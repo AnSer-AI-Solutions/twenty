@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly TOKEN_FILE=/etc/bitwarden-sm/twenty-crm-runtime-readonly.access-token
+readonly PROJECT_ID=e6c761f9-7a4d-45a4-a780-b4860116e943
+readonly COMPOSE_DIR=/opt/twenty/deployments/ct333-twenty
+
+if [[ ! -s "$TOKEN_FILE" ]]; then
+  echo "missing Twenty runtime token: $TOKEN_FILE" >&2
+  exit 1
+fi
+
+action="${1:-up}"
+shift || true
+
+export BWS_ACCESS_TOKEN
+BWS_ACCESS_TOKEN="$(tr -d '\r\n[:blank:]' < "$TOKEN_FILE")"
+
+run_compose() {
+  /usr/local/bin/bws run --project-id "$PROJECT_ID" -- \
+    env -u BWS_ACCESS_TOKEN \
+    TAG=v2.20.0 \
+    SERVER_URL=http://192.168.31.181:3000 \
+    docker compose --project-directory "$COMPOSE_DIR" \
+      -f "$COMPOSE_DIR/compose.yaml" "$@"
+}
+
+case "$action" in
+  config) run_compose config --quiet ;;
+  up) run_compose up -d --remove-orphans "$@" ;;
+  pull) run_compose pull "$@" ;;
+  ps) run_compose ps "$@" ;;
+  logs) run_compose logs "$@" ;;
+  down) run_compose down "$@" ;;
+  *)
+    echo "usage: twenty-run {config|up|pull|ps|logs|down}" >&2
+    exit 2
+    ;;
+esac
