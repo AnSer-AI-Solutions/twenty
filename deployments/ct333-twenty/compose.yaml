@@ -1,0 +1,89 @@
+name: twenty
+
+services:
+  server:
+    image: twentycrm/twenty:${TAG:-v2.20.0}
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_PORT: "3000"
+      PG_DATABASE_URL: postgres://postgres:${PG_DATABASE_PASSWORD:?missing PG_DATABASE_PASSWORD}@db:5432/default
+      SERVER_URL: ${SERVER_URL:-http://192.168.31.181:3000}
+      REDIS_URL: redis://redis:6379
+      STORAGE_TYPE: local
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?missing ENCRYPTION_KEY}
+      APP_SECRET: ""
+    volumes:
+      - server-local-data:/app/packages/twenty-server/.local-storage
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:3000/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  worker:
+    image: twentycrm/twenty:${TAG:-v2.20.0}
+    restart: unless-stopped
+    command: ["yarn", "worker:prod"]
+    environment:
+      PG_DATABASE_URL: postgres://postgres:${PG_DATABASE_PASSWORD:?missing PG_DATABASE_PASSWORD}@db:5432/default
+      SERVER_URL: ${SERVER_URL:-http://192.168.31.181:3000}
+      REDIS_URL: redis://redis:6379
+      DISABLE_DB_MIGRATIONS: "true"
+      DISABLE_CRON_JOBS_REGISTRATION: "true"
+      STORAGE_TYPE: local
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?missing ENCRYPTION_KEY}
+      APP_SECRET: ""
+    volumes:
+      - server-local-data:/app/packages/twenty-server/.local-storage
+    depends_on:
+      db:
+        condition: service_healthy
+      server:
+        condition: service_healthy
+
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: default
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${PG_DATABASE_PASSWORD:?missing PG_DATABASE_PASSWORD}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d default"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--maxmemory-policy", "noeviction"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  dozzle-agent:
+    image: amir20/dozzle:latest
+    restart: unless-stopped
+    command: agent
+    environment:
+      DOZZLE_HOSTNAME: twenty-crm-01
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "7007:7007"
+
+volumes:
+  db-data:
+  server-local-data:
