@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Configure CT333 Company sales fields and sales-table columns."""
+"""Configure CT333 Company sales fields, lifecycle, and saved views."""
 
 from __future__ import annotations
 
@@ -14,8 +14,9 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-
-MANAGED_VIEW_NAMES = ("All Companies", "Dashboard Priority Call Queue")
+EXISTING_VIEW_NAMES = ("All Companies", "Dashboard Priority Call Queue")
+RECONTACT_VIEW_NAME = "Recontact Due"
+MANAGED_VIEW_NAMES = (*EXISTING_VIEW_NAMES, RECONTACT_VIEW_NAME)
 
 SALES_FIELDS: tuple[dict[str, Any], ...] = (
     {
@@ -120,14 +121,158 @@ SALES_FIELDS: tuple[dict[str, Any], ...] = (
         "defaultValue": False,
         "isNullable": False,
     },
+    {
+        "type": "SELECT",
+        "name": "salesLifecycleStatus",
+        "label": "Lifecycle Status",
+        "description": "Sales-owned lifecycle state; records are retained in every state",
+        "defaultValue": "'NEW'",
+        "isNullable": False,
+        "options": [
+            {
+                "color": "gray",
+                "label": "New",
+                "value": "NEW",
+                "position": 0,
+            },
+            {
+                "color": "blue",
+                "label": "Working",
+                "value": "WORKING",
+                "position": 1,
+            },
+            {
+                "color": "yellow",
+                "label": "Nurture",
+                "value": "NURTURE",
+                "position": 2,
+            },
+            {
+                "color": "purple",
+                "label": "Qualified",
+                "value": "QUALIFIED",
+                "position": 3,
+            },
+            {
+                "color": "green",
+                "label": "Won",
+                "value": "WON",
+                "position": 4,
+            },
+            {
+                "color": "orange",
+                "label": "Disqualified",
+                "value": "DISQUALIFIED",
+                "position": 5,
+            },
+            {
+                "color": "red",
+                "label": "Do Not Contact",
+                "value": "DO_NOT_CONTACT",
+                "position": 6,
+            },
+            {
+                "color": "gray",
+                "label": "Closed Business",
+                "value": "CLOSED_BUSINESS",
+                "position": 7,
+            },
+        ],
+    },
+    {
+        "type": "SELECT",
+        "name": "salesDisposition",
+        "label": "Disposition",
+        "description": "Sales-owned reason for the current lifecycle state",
+        "isNullable": True,
+        "options": [
+            {
+                "color": "yellow",
+                "label": "Not Now",
+                "value": "NOT_NOW",
+                "position": 0,
+            },
+            {
+                "color": "orange",
+                "label": "Unreachable",
+                "value": "UNREACHABLE",
+                "position": 1,
+            },
+            {
+                "color": "gray",
+                "label": "Poor Fit",
+                "value": "POOR_FIT",
+                "position": 2,
+            },
+            {
+                "color": "red",
+                "label": "Bad Number",
+                "value": "BAD_NUMBER",
+                "position": 3,
+            },
+            {
+                "color": "gray",
+                "label": "Closed Business",
+                "value": "CLOSED_BUSINESS",
+                "position": 4,
+            },
+            {
+                "color": "red",
+                "label": "Do Not Contact",
+                "value": "DO_NOT_CONTACT",
+                "position": 5,
+            },
+            {
+                "color": "gray",
+                "label": "Other",
+                "value": "OTHER",
+                "position": 6,
+            },
+        ],
+    },
+    {
+        "type": "DATE_TIME",
+        "name": "recontactAt",
+        "label": "Recontact At",
+        "description": "Date when a nurtured lead should return to the sales queue",
+        "isNullable": True,
+    },
 )
 
-QUEUE_COLUMNS: tuple[dict[str, Any], ...] = (
+SALES_COLUMNS: tuple[dict[str, Any], ...] = (
     {"name": "salesActioned", "size": 110},
     {"name": "byronReviewed", "size": 150},
     {"name": "callNotes", "size": 320},
     {"name": "callAttempts", "size": 120},
     {"name": "nextFollowUpAt", "size": 190},
+    {"name": "salesLifecycleStatus", "size": 170},
+    {"name": "salesDisposition", "size": 170},
+    {"name": "recontactAt", "size": 190},
+)
+
+RECONTACT_COLUMNS: tuple[dict[str, Any], ...] = (
+    {"name": "name", "size": 220},
+    {"name": "leadPhone", "size": 180},
+    {"name": "leadEmail", "size": 240},
+    {"name": "leadQualityTier", "size": 140},
+    {"name": "salesLifecycleStatus", "size": 170},
+    {"name": "salesDisposition", "size": 170},
+    {"name": "recontactAt", "size": 190},
+    {"name": "callStatus", "size": 150},
+    {"name": "callNotes", "size": 320},
+)
+
+RECONTACT_FILTERS: tuple[dict[str, Any], ...] = (
+    {
+        "field": "salesLifecycleStatus",
+        "operand": "IS",
+        "value": ["NURTURE"],
+    },
+    {
+        "field": "recontactAt",
+        "operand": "IS_IN_PAST",
+        "value": {},
+    },
 )
 
 
@@ -236,19 +381,16 @@ def configure_sales_workflow(
 
     if apply and any(change.resource == "field" for change in changes):
         company = _company_metadata(client)
-        fields_by_name = {
-            field["name"]: field for field in company.get("fields", [])
-        }
+        fields_by_name = {field["name"]: field for field in company.get("fields", [])}
 
     views = _items(
         client.request(
             "GET",
-            "/rest/metadata/views?"
-            + urlencode({"objectMetadataId": company["id"]}),
+            "/rest/metadata/views?" + urlencode({"objectMetadataId": company["id"]}),
         )
     )
     views_by_name = {view.get("name"): view for view in views}
-    for view_name in MANAGED_VIEW_NAMES:
+    for view_name in EXISTING_VIEW_NAMES:
         view = views_by_name.get(view_name)
         if view is None:
             raise ConfigurationError(f'Twenty view "{view_name}" was not found')
@@ -257,9 +399,83 @@ def configure_sales_workflow(
                 client,
                 view=view,
                 fields_by_name=fields_by_name,
+                columns=SALES_COLUMNS,
                 apply=apply,
             )
         )
+
+    recontact_view = views_by_name.get(RECONTACT_VIEW_NAME)
+    if recontact_view is None:
+        changes.append(
+            Change(
+                action="create",
+                resource="view",
+                name=RECONTACT_VIEW_NAME,
+                details={"type": "TABLE", "visibility": "WORKSPACE"},
+            )
+        )
+        if apply:
+            recontact_view = client.request(
+                "POST",
+                "/rest/metadata/views",
+                {
+                    "name": RECONTACT_VIEW_NAME,
+                    "objectMetadataId": company["id"],
+                    "icon": "IconCalendar",
+                    "type": "TABLE",
+                    "position": len(views),
+                    "isCompact": False,
+                    "openRecordIn": "SIDE_PANEL",
+                    "visibility": "WORKSPACE",
+                },
+                expected=(201,),
+            )
+
+    if recontact_view is not None:
+        changes.extend(
+            _configure_view_columns(
+                client,
+                view=recontact_view,
+                fields_by_name=fields_by_name,
+                columns=RECONTACT_COLUMNS,
+                apply=apply,
+            )
+        )
+        changes.extend(
+            _configure_view_filters(
+                client,
+                view=recontact_view,
+                fields_by_name=fields_by_name,
+                apply=apply,
+            )
+        )
+    else:
+        for column in RECONTACT_COLUMNS:
+            changes.append(
+                Change(
+                    action="create",
+                    resource="viewField",
+                    name=column["name"],
+                    details={
+                        "view": RECONTACT_VIEW_NAME,
+                        "isVisible": True,
+                        "size": column["size"],
+                    },
+                )
+            )
+        for definition in RECONTACT_FILTERS:
+            changes.append(
+                Change(
+                    action="create",
+                    resource="viewFilter",
+                    name=definition["field"],
+                    details={
+                        "view": RECONTACT_VIEW_NAME,
+                        "operand": definition["operand"],
+                        "value": definition["value"],
+                    },
+                )
+            )
 
     return changes
 
@@ -269,6 +485,7 @@ def _configure_view_columns(
     *,
     view: dict[str, Any],
     fields_by_name: dict[str, dict[str, Any]],
+    columns: tuple[dict[str, Any], ...],
     apply: bool,
 ) -> list[Change]:
     changes: list[Change] = []
@@ -280,7 +497,7 @@ def _configure_view_columns(
     )
     target_ids = {
         fields_by_name[column["name"]]["id"]
-        for column in QUEUE_COLUMNS
+        for column in columns
         if column["name"] in fields_by_name
     }
     non_target_positions = [
@@ -289,11 +506,9 @@ def _configure_view_columns(
         if item.get("fieldMetadataId") not in target_ids
     ]
     first_position = max(non_target_positions, default=-1) + 1
-    view_fields_by_field_id = {
-        item["fieldMetadataId"]: item for item in view_fields
-    }
+    view_fields_by_field_id = {item["fieldMetadataId"]: item for item in view_fields}
 
-    for offset, column in enumerate(QUEUE_COLUMNS):
+    for offset, column in enumerate(columns):
         field = fields_by_name.get(column["name"])
         target = {
             "isVisible": True,
@@ -364,6 +579,103 @@ def _configure_view_columns(
     return changes
 
 
+def _configure_view_filters(
+    client: TwentyMetadataClient,
+    *,
+    view: dict[str, Any],
+    fields_by_name: dict[str, dict[str, Any]],
+    apply: bool,
+) -> list[Change]:
+    changes: list[Change] = []
+    view_filters = _items(
+        client.request(
+            "GET",
+            "/rest/metadata/viewFilters?" + urlencode({"viewId": view["id"]}),
+        )
+    )
+    filters_by_field_id: dict[str, dict[str, Any]] = {}
+    for item in view_filters:
+        field_id = item.get("fieldMetadataId")
+        if field_id in filters_by_field_id:
+            raise ConfigurationError(
+                f'Twenty view "{view["name"]}" has duplicate filters for '
+                f"field {field_id}"
+            )
+        if field_id:
+            filters_by_field_id[field_id] = item
+
+    for definition in RECONTACT_FILTERS:
+        field = fields_by_name.get(definition["field"])
+        if field is None:
+            if apply:
+                raise ConfigurationError(
+                    f"Twenty field {definition['field']} was not returned "
+                    "after creation"
+                )
+            changes.append(
+                Change(
+                    action="create",
+                    resource="viewFilter",
+                    name=definition["field"],
+                    details={
+                        "view": view["name"],
+                        "operand": definition["operand"],
+                        "value": definition["value"],
+                    },
+                )
+            )
+            continue
+
+        target = {
+            "operand": definition["operand"],
+            "value": definition["value"],
+        }
+        existing = filters_by_field_id.get(field["id"])
+        if existing is None:
+            changes.append(
+                Change(
+                    action="create",
+                    resource="viewFilter",
+                    name=definition["field"],
+                    details={"view": view["name"], **target},
+                )
+            )
+            if apply:
+                client.request(
+                    "POST",
+                    "/rest/metadata/viewFilters",
+                    {
+                        "viewId": view["id"],
+                        "fieldMetadataId": field["id"],
+                        **target,
+                    },
+                    expected=(201,),
+                )
+            continue
+
+        update = {
+            key: value for key, value in target.items() if existing.get(key) != value
+        }
+        if not update:
+            continue
+        changes.append(
+            Change(
+                action="update",
+                resource="viewFilter",
+                name=definition["field"],
+                details={"view": view["name"], **update},
+            )
+        )
+        if apply:
+            client.request(
+                "PATCH",
+                f"/rest/metadata/viewFilters/{existing['id']}",
+                update,
+            )
+
+    return changes
+
+
 def _company_metadata(client: TwentyMetadataClient) -> dict[str, Any]:
     objects = _items(client.request("GET", "/rest/metadata/objects?limit=100"))
     company = next(
@@ -384,7 +696,7 @@ def _items(payload: Any) -> list[dict[str, Any]]:
     if isinstance(data, list):
         return data
     if isinstance(data, dict):
-        for key in ("objects", "views", "viewFields"):
+        for key in ("objects", "views", "viewFields", "viewFilters"):
             value = data.get(key)
             if isinstance(value, list):
                 return value
@@ -413,7 +725,7 @@ def _validate_existing_field(
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Configure CT333 Company sales fields and sales-table columns. "
+            "Configure CT333 Company sales fields, lifecycle, and saved views. "
             "The default mode is read-only."
         )
     )
