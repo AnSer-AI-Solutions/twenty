@@ -1,0 +1,442 @@
+#!/usr/bin/env python3
+"""Configure CT333 Company sales fields and priority-queue columns."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import time
+from dataclasses import dataclass
+from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+
+
+QUEUE_VIEW_NAME = "Dashboard Priority Call Queue"
+
+SALES_FIELDS: tuple[dict[str, Any], ...] = (
+    {
+        "type": "SELECT",
+        "name": "callStatus",
+        "label": "Call Status",
+        "description": "Latest sales call outcome",
+        "defaultValue": "'NOT_CALLED'",
+        "isNullable": True,
+        "options": [
+            {
+                "color": "gray",
+                "label": "Not Called",
+                "value": "NOT_CALLED",
+                "position": 0,
+            },
+            {
+                "color": "orange",
+                "label": "No Answer",
+                "value": "NO_ANSWER",
+                "position": 1,
+            },
+            {
+                "color": "yellow",
+                "label": "Voicemail",
+                "value": "VOICEMAIL",
+                "position": 2,
+            },
+            {
+                "color": "blue",
+                "label": "Connected",
+                "value": "CONNECTED",
+                "position": 3,
+            },
+            {
+                "color": "purple",
+                "label": "Callback",
+                "value": "CALLBACK",
+                "position": 4,
+            },
+            {
+                "color": "green",
+                "label": "Qualified",
+                "value": "QUALIFIED",
+                "position": 5,
+            },
+            {
+                "color": "gray",
+                "label": "Not Interested",
+                "value": "NOT_INTERESTED",
+                "position": 6,
+            },
+            {
+                "color": "red",
+                "label": "Bad Number",
+                "value": "BAD_NUMBER",
+                "position": 7,
+            },
+        ],
+    },
+    {
+        "type": "NUMBER",
+        "name": "callAttempts",
+        "label": "Call Attempts",
+        "description": "Number of outbound call attempts",
+        "isNullable": True,
+    },
+    {
+        "type": "DATE_TIME",
+        "name": "lastCalledAt",
+        "label": "Last Called At",
+        "description": "Time of the latest outbound call",
+        "isNullable": True,
+    },
+    {
+        "type": "DATE_TIME",
+        "name": "nextFollowUpAt",
+        "label": "Next Follow-Up",
+        "description": "Scheduled time for the next sales follow-up",
+        "isNullable": True,
+    },
+    {
+        "type": "RICH_TEXT",
+        "name": "callNotes",
+        "label": "Call Notes",
+        "description": "Sales notes from outbound calls",
+        "isNullable": True,
+    },
+    {
+        "type": "BOOLEAN",
+        "name": "salesActioned",
+        "label": "Actioned",
+        "description": "Sales has taken the next action for this company",
+        "defaultValue": False,
+        "isNullable": False,
+    },
+    {
+        "type": "BOOLEAN",
+        "name": "byronReviewed",
+        "label": "Byron Reviewed",
+        "description": "Byron has reviewed this company",
+        "defaultValue": False,
+        "isNullable": False,
+    },
+)
+
+QUEUE_COLUMNS: tuple[dict[str, Any], ...] = (
+    {"name": "salesActioned", "size": 110},
+    {"name": "byronReviewed", "size": 150},
+    {"name": "callNotes", "size": 320},
+    {"name": "callAttempts", "size": 120},
+    {"name": "nextFollowUpAt", "size": 190},
+)
+
+
+class ConfigurationError(RuntimeError):
+    """Raised when the live metadata cannot be changed safely."""
+
+
+@dataclass(frozen=True, slots=True)
+class Change:
+    action: str
+    resource: str
+    name: str
+    details: dict[str, Any]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "action": self.action,
+            "resource": self.resource,
+            "name": self.name,
+            **self.details,
+        }
+
+
+class TwentyMetadataClient:
+    def __init__(self, base_url: str, api_key: str, timeout_seconds: int = 20):
+        if not base_url:
+            raise ConfigurationError("TWENTY_API_URL is required")
+        if not api_key:
+            raise ConfigurationError("TWENTY_API_KEY is required")
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+        self.timeout_seconds = timeout_seconds
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        expected: tuple[int, ...] = (200,),
+    ) -> Any:
+        body = json.dumps(payload).encode() if payload is not None else None
+        request = Request(
+            self.base_url + path,
+            data=body,
+            method=method,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+        )
+        for attempt in range(1, 4):
+            try:
+                with urlopen(request, timeout=self.timeout_seconds) as response:
+                    if response.status not in expected:
+                        raise ConfigurationError(
+                            f"Twenty returned unexpected HTTP {response.status}"
+                        )
+                    return json.load(response)
+            except HTTPError as exc:
+                detail = exc.read(4096).decode(errors="replace")
+                if (exc.code == 429 or exc.code >= 500) and attempt < 3:
+                    time.sleep(attempt)
+                    continue
+                raise ConfigurationError(
+                    f"Twenty metadata request failed with HTTP {exc.code}: {detail}"
+                ) from exc
+            except (URLError, TimeoutError) as exc:
+                if attempt < 3:
+                    time.sleep(attempt)
+                    continue
+                raise ConfigurationError(
+                    f"Twenty metadata connection failed: {exc}"
+                ) from exc
+        raise AssertionError("unreachable")
+
+
+def configure_sales_workflow(
+    client: TwentyMetadataClient, *, apply: bool
+) -> list[Change]:
+    changes: list[Change] = []
+    company = _company_metadata(client)
+    fields_by_name = {field["name"]: field for field in company.get("fields", [])}
+
+    for definition in SALES_FIELDS:
+        existing = fields_by_name.get(definition["name"])
+        if existing is not None:
+            _validate_existing_field(existing, definition)
+            continue
+
+        changes.append(
+            Change(
+                action="create",
+                resource="field",
+                name=definition["name"],
+                details={"label": definition["label"], "type": definition["type"]},
+            )
+        )
+        if apply:
+            client.request(
+                "POST",
+                "/rest/metadata/fields",
+                {**definition, "objectMetadataId": company["id"]},
+                expected=(201,),
+            )
+
+    if apply and any(change.resource == "field" for change in changes):
+        company = _company_metadata(client)
+        fields_by_name = {
+            field["name"]: field for field in company.get("fields", [])
+        }
+
+    views = _items(
+        client.request(
+            "GET",
+            "/rest/metadata/views?"
+            + urlencode({"objectMetadataId": company["id"]}),
+        )
+    )
+    queue = next((view for view in views if view.get("name") == QUEUE_VIEW_NAME), None)
+    if queue is None:
+        raise ConfigurationError(f'Twenty view "{QUEUE_VIEW_NAME}" was not found')
+
+    view_fields = _items(
+        client.request(
+            "GET",
+            "/rest/metadata/viewFields?" + urlencode({"viewId": queue["id"]}),
+        )
+    )
+    target_ids = {
+        fields_by_name[column["name"]]["id"]
+        for column in QUEUE_COLUMNS
+        if column["name"] in fields_by_name
+    }
+    non_target_positions = [
+        item.get("position", 0)
+        for item in view_fields
+        if item.get("fieldMetadataId") not in target_ids
+    ]
+    first_position = max(non_target_positions, default=-1) + 1
+    view_fields_by_field_id = {
+        item["fieldMetadataId"]: item for item in view_fields
+    }
+
+    for offset, column in enumerate(QUEUE_COLUMNS):
+        field = fields_by_name.get(column["name"])
+        target = {
+            "isVisible": True,
+            "position": first_position + offset,
+            "size": column["size"],
+        }
+
+        if field is None:
+            if apply:
+                raise ConfigurationError(
+                    f"Twenty field {column['name']} was not returned after creation"
+                )
+            changes.append(
+                Change(
+                    action="create",
+                    resource="viewField",
+                    name=column["name"],
+                    details=target,
+                )
+            )
+            continue
+
+        existing_view_field = view_fields_by_field_id.get(field["id"])
+        if existing_view_field is None:
+            changes.append(
+                Change(
+                    action="create",
+                    resource="viewField",
+                    name=column["name"],
+                    details=target,
+                )
+            )
+            if apply:
+                client.request(
+                    "POST",
+                    "/rest/metadata/viewFields",
+                    {
+                        "viewId": queue["id"],
+                        "fieldMetadataId": field["id"],
+                        **target,
+                    },
+                    expected=(201,),
+                )
+            continue
+
+        update = {
+            key: value
+            for key, value in target.items()
+            if existing_view_field.get(key) != value
+        }
+        if not update:
+            continue
+        changes.append(
+            Change(
+                action="update",
+                resource="viewField",
+                name=column["name"],
+                details=update,
+            )
+        )
+        if apply:
+            client.request(
+                "PATCH",
+                f"/rest/metadata/viewFields/{existing_view_field['id']}",
+                update,
+            )
+
+    return changes
+
+
+def _company_metadata(client: TwentyMetadataClient) -> dict[str, Any]:
+    objects = _items(client.request("GET", "/rest/metadata/objects?limit=100"))
+    company = next(
+        (item for item in objects if item.get("nameSingular") == "company"),
+        None,
+    )
+    if company is None:
+        raise ConfigurationError("Twenty Company object was not found")
+    return company
+
+
+def _items(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return payload
+    if not isinstance(payload, dict):
+        raise ConfigurationError("Twenty returned invalid metadata JSON")
+    data = payload.get("data", payload)
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in ("objects", "views", "viewFields"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return value
+    raise ConfigurationError("Twenty metadata response did not contain a list")
+
+
+def _validate_existing_field(
+    existing: dict[str, Any], definition: dict[str, Any]
+) -> None:
+    for key in ("type", "label"):
+        if existing.get(key) != definition.get(key):
+            raise ConfigurationError(
+                f"Twenty field {definition['name']} has {key} "
+                f"{existing.get(key)!r}, expected {definition.get(key)!r}"
+            )
+    if definition["type"] != "SELECT":
+        return
+    actual_values = [option.get("value") for option in existing.get("options") or []]
+    expected_values = [option["value"] for option in definition["options"]]
+    if actual_values != expected_values:
+        raise ConfigurationError(
+            f"Twenty field {definition['name']} has unexpected select options"
+        )
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Configure CT333 Company sales fields and the priority call queue. "
+            "The default mode is read-only."
+        )
+    )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Apply the reported metadata changes. Omit for a read-only dry run.",
+    )
+    parser.add_argument(
+        "--base-url",
+        default=os.environ.get("TWENTY_API_URL", ""),
+        help="Twenty base URL (default: TWENTY_API_URL).",
+    )
+    parser.add_argument(
+        "--timeout-seconds",
+        type=int,
+        default=20,
+        help="HTTP request timeout (default: 20).",
+    )
+    return parser
+
+
+def main() -> int:
+    args = _parser().parse_args()
+    try:
+        client = TwentyMetadataClient(
+            args.base_url,
+            os.environ.get("TWENTY_API_KEY", ""),
+            args.timeout_seconds,
+        )
+        changes = configure_sales_workflow(client, apply=args.apply)
+    except ConfigurationError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    result = {
+        "mode": "apply" if args.apply else "dry-run",
+        "view": QUEUE_VIEW_NAME,
+        "changeCount": len(changes),
+        "changes": [change.as_dict() for change in changes],
+    }
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
