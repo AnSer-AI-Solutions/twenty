@@ -21,7 +21,7 @@ class FakeClient:
         self,
         *,
         include_sales_fields: bool = False,
-        include_queue_fields: bool = False,
+        include_managed_view_fields: bool = False,
     ) -> None:
         self.company = {
             "id": "10000000-0000-0000-0000-000000000001",
@@ -41,31 +41,40 @@ class FakeClient:
                 },
             ],
         }
-        self.view = {
-            "id": "20000000-0000-0000-0000-000000000001",
-            "name": workflow.QUEUE_VIEW_NAME,
-        }
-        self.view_fields = [
+        self.views = [
             {
-                "id": "view-field-name",
-                "fieldMetadataId": "field-name",
-                "isVisible": True,
-                "position": 0,
-                "size": 220,
+                "id": "20000000-0000-0000-0000-000000000001",
+                "name": "All Companies",
             },
             {
-                "id": "view-field-industry",
-                "fieldMetadataId": "field-industry",
-                "isVisible": True,
-                "position": 6,
-                "size": 220,
+                "id": "20000000-0000-0000-0000-000000000002",
+                "name": "Dashboard Priority Call Queue",
             },
         ]
+        self.view_fields = {
+            view["id"]: [
+                {
+                    "id": f"view-field-name-{view['id']}",
+                    "fieldMetadataId": "field-name",
+                    "isVisible": True,
+                    "position": 0,
+                    "size": 220,
+                },
+                {
+                    "id": f"view-field-industry-{view['id']}",
+                    "fieldMetadataId": "field-industry",
+                    "isVisible": True,
+                    "position": 6,
+                    "size": 220,
+                },
+            ]
+            for view in self.views
+        }
         self.calls: list[tuple[str, str, dict[str, Any] | None]] = []
         if include_sales_fields:
             self._add_sales_fields()
-        if include_queue_fields:
-            self._add_queue_fields()
+        if include_managed_view_fields:
+            self._add_managed_view_fields()
 
     def request(
         self,
@@ -79,9 +88,10 @@ class FakeClient:
         if method == "GET" and path.startswith("/rest/metadata/objects"):
             return {"data": [copy.deepcopy(self.company)]}
         if method == "GET" and path.startswith("/rest/metadata/views?"):
-            return [copy.deepcopy(self.view)]
+            return copy.deepcopy(self.views)
         if method == "GET" and path.startswith("/rest/metadata/viewFields?"):
-            return copy.deepcopy(self.view_fields)
+            view_id = path.split("viewId=", 1)[1]
+            return copy.deepcopy(self.view_fields[view_id])
         if method == "POST" and path == "/rest/metadata/fields":
             assert payload is not None
             field = copy.deepcopy(payload)
@@ -91,13 +101,20 @@ class FakeClient:
         if method == "POST" and path == "/rest/metadata/viewFields":
             assert payload is not None
             view_field = copy.deepcopy(payload)
-            view_field["id"] = f"view-field-{payload['fieldMetadataId']}"
-            self.view_fields.append(view_field)
+            view_field["id"] = (
+                f"view-field-{payload['viewId']}-{payload['fieldMetadataId']}"
+            )
+            self.view_fields[payload["viewId"]].append(view_field)
             return view_field
         if method == "PATCH" and path.startswith("/rest/metadata/viewFields/"):
             assert payload is not None
             view_field_id = path.rsplit("/", 1)[-1]
-            target = next(item for item in self.view_fields if item["id"] == view_field_id)
+            target = next(
+                item
+                for items in self.view_fields.values()
+                for item in items
+                if item["id"] == view_field_id
+            )
             target.update(payload)
             return copy.deepcopy(target)
         raise AssertionError(f"unexpected request: {method} {path}")
@@ -111,18 +128,19 @@ class FakeClient:
             field["id"] = f"field-{definition['name']}"
             self.company["fields"].append(field)
 
-    def _add_queue_fields(self) -> None:
+    def _add_managed_view_fields(self) -> None:
         fields = {field["name"]: field for field in self.company["fields"]}
-        for position, column in enumerate(workflow.QUEUE_COLUMNS, start=7):
-            self.view_fields.append(
-                {
-                    "id": f"view-field-{column['name']}",
-                    "fieldMetadataId": fields[column["name"]]["id"],
-                    "isVisible": True,
-                    "position": position,
-                    "size": column["size"],
-                }
-            )
+        for view in self.views:
+            for position, column in enumerate(workflow.QUEUE_COLUMNS, start=7):
+                self.view_fields[view["id"]].append(
+                    {
+                        "id": f"view-field-{view['id']}-{column['name']}",
+                        "fieldMetadataId": fields[column["name"]]["id"],
+                        "isVisible": True,
+                        "position": position,
+                        "size": column["size"],
+                    }
+                )
 
 
 class ConfigureSalesWorkflowTests(unittest.TestCase):
@@ -136,8 +154,16 @@ class ConfigureSalesWorkflowTests(unittest.TestCase):
             {definition["name"] for definition in workflow.SALES_FIELDS},
         )
         self.assertEqual(
-            [change.name for change in changes if change.resource == "viewField"],
-            [column["name"] for column in workflow.QUEUE_COLUMNS],
+            [
+                (change.details["view"], change.name)
+                for change in changes
+                if change.resource == "viewField"
+            ],
+            [
+                (view_name, column["name"])
+                for view_name in workflow.MANAGED_VIEW_NAMES
+                for column in workflow.QUEUE_COLUMNS
+            ],
         )
         self.assertFalse(any(method != "GET" for method, _, _ in client.calls))
 
@@ -151,20 +177,27 @@ class ConfigureSalesWorkflowTests(unittest.TestCase):
             len([call for call in writes if call[1] == "/rest/metadata/fields"]),
             len(workflow.SALES_FIELDS),
         )
-        queue_creates = [
+        view_field_creates = [
             call for call in writes if call[1] == "/rest/metadata/viewFields"
         ]
-        self.assertEqual(len(queue_creates), len(workflow.QUEUE_COLUMNS))
         self.assertEqual(
-            [call[2]["position"] for call in queue_creates if call[2]],
-            [7, 8, 9, 10, 11],
+            len(view_field_creates),
+            len(workflow.MANAGED_VIEW_NAMES) * len(workflow.QUEUE_COLUMNS),
         )
-        self.assertEqual(client.view_fields[0]["position"], 0)
-        self.assertEqual(client.view_fields[1]["position"], 6)
+        self.assertEqual(
+            [call[2]["position"] for call in view_field_creates if call[2]],
+            [7, 8, 9, 10, 11, 7, 8, 9, 10, 11],
+        )
+        for items in client.view_fields.values():
+            self.assertEqual(items[0]["position"], 0)
+            self.assertEqual(items[1]["position"], 6)
         self.assertTrue(changes)
 
     def test_repeated_apply_is_idempotent(self) -> None:
-        client = FakeClient(include_sales_fields=True, include_queue_fields=True)
+        client = FakeClient(
+            include_sales_fields=True,
+            include_managed_view_fields=True,
+        )
 
         changes = workflow.configure_sales_workflow(client, apply=True)
 
@@ -178,7 +211,12 @@ class ConfigureSalesWorkflowTests(unittest.TestCase):
             for field in client.company["fields"]
             if field["name"] == "salesActioned"
         )
-        client.view_fields.append(
+        queue_view = next(
+            view
+            for view in client.views
+            if view["name"] == "Dashboard Priority Call Queue"
+        )
+        client.view_fields[queue_view["id"]].append(
             {
                 "id": "existing-actioned",
                 "fieldMetadataId": actioned["id"],
@@ -203,9 +241,40 @@ class ConfigureSalesWorkflowTests(unittest.TestCase):
         self.assertEqual(
             sum(
                 item["fieldMetadataId"] == actioned["id"]
-                for item in client.view_fields
+                for item in client.view_fields[queue_view["id"]]
             ),
             1,
+        )
+
+    def test_hidden_standard_mappings_are_made_visible(self) -> None:
+        client = FakeClient(
+            include_sales_fields=True,
+            include_managed_view_fields=True,
+        )
+        standard_view = next(
+            view for view in client.views if view["name"] == "All Companies"
+        )
+        target_names = {column["name"] for column in workflow.QUEUE_COLUMNS}
+        fields_by_id = {field["id"]: field["name"] for field in client.company["fields"]}
+        for item in client.view_fields[standard_view["id"]]:
+            if fields_by_id.get(item["fieldMetadataId"]) in target_names:
+                item["isVisible"] = False
+
+        changes = workflow.configure_sales_workflow(client, apply=True)
+
+        standard_changes = [
+            change
+            for change in changes
+            if change.resource == "viewField"
+            and change.details["view"] == "All Companies"
+        ]
+        self.assertEqual(
+            [change.name for change in standard_changes],
+            [column["name"] for column in workflow.QUEUE_COLUMNS],
+        )
+        self.assertTrue(
+            all(change.details == {"view": "All Companies", "isVisible": True}
+                for change in standard_changes)
         )
 
     def test_field_type_drift_fails_before_writes(self) -> None:

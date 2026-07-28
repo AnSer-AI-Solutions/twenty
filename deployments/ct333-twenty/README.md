@@ -26,8 +26,8 @@ sudo twenty-run ps
 ## Sales workflow metadata
 
 `configure_sales_workflow.py` keeps the Company sales workflow fields and the
-`Dashboard Priority Call Queue` columns reproducible through Twenty's supported
-metadata API.
+`All Companies` and `Dashboard Priority Call Queue` columns reproducible
+through Twenty's supported metadata API.
 
 It owns these Company fields:
 
@@ -36,16 +36,16 @@ It owns these Company fields:
 - `salesActioned` (label `Actioned`) and `byronReviewed` (label
   `Byron Reviewed`)
 
-The priority queue keeps its existing columns and appends `Actioned`,
+Both managed table views keep their existing columns and append `Actioned`,
 `Byron Reviewed`, `Call Notes`, `Call Attempts`, and `Next Follow-Up`. The
 configurator does not read or write Company records, delete fields, or remove
 view columns.
 
 Creating a missing custom field invokes Twenty's normal workspace schema
 migration. Twenty may also register that field in its standard Company views
-using the product defaults (hidden in the standard table and available on the
-record page). This configurator explicitly controls visibility and ordering
-only in `Dashboard Priority Call Queue`.
+using the product defaults. This configurator explicitly controls visibility
+and ordering in `All Companies` and `Dashboard Priority Call Queue`; Twenty's
+record-page defaults remain unchanged.
 
 The script is dry-run by default. Run it from a merged `main` checkout by
 streaming it into the CT332 CRM sync container, which already has the scoped
