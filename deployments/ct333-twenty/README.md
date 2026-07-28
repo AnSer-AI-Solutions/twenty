@@ -26,8 +26,8 @@ sudo twenty-run ps
 ## Sales workflow metadata
 
 `configure_sales_workflow.py` keeps the Company sales workflow fields and the
-`All Companies` and `Dashboard Priority Call Queue` columns reproducible
-through Twenty's supported metadata API.
+`All Companies`, `Dashboard Priority Call Queue`, and `Recontact Due` views
+reproducible through Twenty's supported metadata API.
 
 It owns these Company fields:
 
@@ -35,11 +35,22 @@ It owns these Company fields:
   `callNotes`
 - `salesActioned` (label `Actioned`) and `byronReviewed` (label
   `Byron Reviewed`)
+- `salesLifecycleStatus`, `salesDisposition`, and `recontactAt`
 
-Both managed table views keep their existing columns and append `Actioned`,
-`Byron Reviewed`, `Call Notes`, `Call Attempts`, and `Next Follow-Up`. The
-configurator does not read or write Company records, delete fields, or remove
-view columns.
+The two existing sales table views keep their existing columns and append
+`Actioned`, `Byron Reviewed`, `Call Notes`, `Call Attempts`, and
+`Next Follow-Up`. The configurator also appends lifecycle, disposition, and
+recontact fields. The `Recontact Due` view shows only `NURTURE` companies
+whose `Recontact At` date is in the past. The configurator does not read or
+write Company records, delete fields, remove view columns, or remove
+saved-view filters.
+
+Lead records are retained regardless of lifecycle state. Use `NURTURE` for a
+lead that should return later; the CT332 daily CRM sync fills a blank
+`Recontact At` with the date exactly six calendar months from that run.
+Existing recontact dates are never overwritten. `DO_NOT_CONTACT`,
+`DISQUALIFIED`, `WON`, and `CLOSED_BUSINESS` records are not eligible because
+the scheduler queries only `NURTURE`.
 
 Creating a missing custom field invokes Twenty's normal workspace schema
 migration. Twenty may also register that field in its standard Company views
