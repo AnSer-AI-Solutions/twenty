@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Configure CT333 Company sales fields and priority-queue columns."""
+"""Configure CT333 Company sales fields and sales-table columns."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 
-QUEUE_VIEW_NAME = "Dashboard Priority Call Queue"
+MANAGED_VIEW_NAMES = ("All Companies", "Dashboard Priority Call Queue")
 
 SALES_FIELDS: tuple[dict[str, Any], ...] = (
     {
@@ -247,14 +247,35 @@ def configure_sales_workflow(
             + urlencode({"objectMetadataId": company["id"]}),
         )
     )
-    queue = next((view for view in views if view.get("name") == QUEUE_VIEW_NAME), None)
-    if queue is None:
-        raise ConfigurationError(f'Twenty view "{QUEUE_VIEW_NAME}" was not found')
+    views_by_name = {view.get("name"): view for view in views}
+    for view_name in MANAGED_VIEW_NAMES:
+        view = views_by_name.get(view_name)
+        if view is None:
+            raise ConfigurationError(f'Twenty view "{view_name}" was not found')
+        changes.extend(
+            _configure_view_columns(
+                client,
+                view=view,
+                fields_by_name=fields_by_name,
+                apply=apply,
+            )
+        )
 
+    return changes
+
+
+def _configure_view_columns(
+    client: TwentyMetadataClient,
+    *,
+    view: dict[str, Any],
+    fields_by_name: dict[str, dict[str, Any]],
+    apply: bool,
+) -> list[Change]:
+    changes: list[Change] = []
     view_fields = _items(
         client.request(
             "GET",
-            "/rest/metadata/viewFields?" + urlencode({"viewId": queue["id"]}),
+            "/rest/metadata/viewFields?" + urlencode({"viewId": view["id"]}),
         )
     )
     target_ids = {
@@ -290,7 +311,7 @@ def configure_sales_workflow(
                     action="create",
                     resource="viewField",
                     name=column["name"],
-                    details=target,
+                    details={"view": view["name"], **target},
                 )
             )
             continue
@@ -302,7 +323,7 @@ def configure_sales_workflow(
                     action="create",
                     resource="viewField",
                     name=column["name"],
-                    details=target,
+                    details={"view": view["name"], **target},
                 )
             )
             if apply:
@@ -310,7 +331,7 @@ def configure_sales_workflow(
                     "POST",
                     "/rest/metadata/viewFields",
                     {
-                        "viewId": queue["id"],
+                        "viewId": view["id"],
                         "fieldMetadataId": field["id"],
                         **target,
                     },
@@ -330,7 +351,7 @@ def configure_sales_workflow(
                 action="update",
                 resource="viewField",
                 name=column["name"],
-                details=update,
+                details={"view": view["name"], **update},
             )
         )
         if apply:
@@ -392,7 +413,7 @@ def _validate_existing_field(
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Configure CT333 Company sales fields and the priority call queue. "
+            "Configure CT333 Company sales fields and sales-table columns. "
             "The default mode is read-only."
         )
     )
@@ -430,7 +451,7 @@ def main() -> int:
 
     result = {
         "mode": "apply" if args.apply else "dry-run",
-        "view": QUEUE_VIEW_NAME,
+        "views": list(MANAGED_VIEW_NAMES),
         "changeCount": len(changes),
         "changes": [change.as_dict() for change in changes],
     }
