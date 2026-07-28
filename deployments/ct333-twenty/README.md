@@ -41,6 +41,12 @@ The priority queue keeps its existing columns and appends `Actioned`,
 configurator does not read or write Company records, delete fields, or remove
 view columns.
 
+Creating a missing custom field invokes Twenty's normal workspace schema
+migration. Twenty may also register that field in its standard Company views
+using the product defaults (hidden in the standard table and available on the
+record page). This configurator explicitly controls visibility and ordering
+only in `Dashboard Priority Call Queue`.
+
 The script is dry-run by default. Run it from a merged `main` checkout by
 streaming it into the CT332 CRM sync container, which already has the scoped
 Twenty API URL and key:
