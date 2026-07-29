@@ -12,12 +12,12 @@ import os
 import sys
 import time
 import uuid
-from collections import Counter
+from collections import Counter, deque
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -31,6 +31,8 @@ MAX_COMPANY_PAGES = 100
 ALLOWED_METHODS = ("GET", "PATCH")
 RETRYABLE_METHODS = ("GET",)
 MAX_ATTEMPTS = 3
+RATE_LIMIT_REQUESTS = 75
+RATE_LIMIT_WINDOW_SECONDS = 60.0
 
 REQUIRED_COLUMNS = frozenset(
     {
@@ -90,14 +92,44 @@ class RankingRow:
 
 
 class TwentyClient:
-    def __init__(self, base_url: str, api_key: str, timeout_seconds: int = 20):
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        timeout_seconds: int = 20,
+        *,
+        requests_per_window: int = RATE_LIMIT_REQUESTS,
+        window_seconds: float = RATE_LIMIT_WINDOW_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+        sleeper: Callable[[float], None] = time.sleep,
+    ):
         if not base_url:
             raise RankingError("TWENTY_API_URL is required")
         if not api_key:
             raise RankingError("TWENTY_API_KEY is required")
+        if requests_per_window <= 0:
+            raise RankingError("requests_per_window must be positive")
+        if window_seconds <= 0:
+            raise RankingError("window_seconds must be positive")
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout_seconds = timeout_seconds
+        self.requests_per_window = requests_per_window
+        self.window_seconds = window_seconds
+        self.clock = clock
+        self.sleeper = sleeper
+        self.request_times: deque[float] = deque()
+
+    def _wait_for_rate_slot(self) -> None:
+        while True:
+            now = self.clock()
+            cutoff = now - self.window_seconds
+            while self.request_times and self.request_times[0] <= cutoff:
+                self.request_times.popleft()
+            if len(self.request_times) < self.requests_per_window:
+                self.request_times.append(now)
+                return
+            self.sleeper(self.window_seconds - (now - self.request_times[0]))
 
     def request(
         self,
@@ -121,6 +153,7 @@ class TwentyClient:
         )
         attempts = MAX_ATTEMPTS if method in RETRYABLE_METHODS else 1
         for attempt in range(1, attempts + 1):
+            self._wait_for_rate_slot()
             try:
                 with urlopen(request, timeout=self.timeout_seconds) as response:
                     if response.status not in expected:
@@ -433,7 +466,11 @@ def _iso_datetime(value: str) -> str:
         raise RankingError("manifest scoredAt must be an ISO-8601 datetime") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise RankingError("manifest scoredAt must include a timezone")
-    return parsed.astimezone(UTC).isoformat().replace("+00:00", "Z")
+    return (
+        parsed.astimezone(UTC)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
 
 
 def _live_company_map(
