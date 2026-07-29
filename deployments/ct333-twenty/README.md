@@ -74,6 +74,14 @@ whose `Recontact At` date is in the past. The configurator does not read or
 write Company records, delete fields, remove view columns, or remove
 saved-view filters.
 
+A preflight runs before the first write, identically in both modes. The managed
+columns also reference Company fields this configurator does not own: the
+standard `name`, plus `leadPhone`, `leadEmail`, and `leadQualityTier`, which the
+enrichment pipeline owns. If any of them is absent, the run fails with the same
+error in a dry run and in an apply, having written nothing. Add the missing
+field upstream, where it is owned; the configurator will not create it, because
+a definition invented here would drift from the owner's.
+
 Lead records are retained regardless of lifecycle state. Use `NURTURE` for a
 lead that should return later; the CT332 daily CRM sync fills a blank
 `Recontact At` with the date exactly six calendar months from that run.

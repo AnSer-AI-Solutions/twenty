@@ -275,6 +275,29 @@ RECONTACT_FILTERS: tuple[dict[str, Any], ...] = (
     },
 )
 
+# Every Company field this configurator creates itself.
+OWNED_FIELD_NAMES: frozenset[str] = frozenset(
+    definition["name"] for definition in SALES_FIELDS
+)
+
+
+def _dependency_field_names() -> tuple[str, ...]:
+    names: list[str] = []
+    for column in (*SALES_COLUMNS, *RECONTACT_COLUMNS):
+        if column["name"] not in OWNED_FIELD_NAMES and column["name"] not in names:
+            names.append(column["name"])
+    for definition in RECONTACT_FILTERS:
+        field = definition["field"]
+        if field not in OWNED_FIELD_NAMES and field not in names:
+            names.append(field)
+    return tuple(names)
+
+
+# Managed columns and filters also reference the standard `name` and the
+# enrichment-owned lead fields. Creating either here would take over a
+# definition this configurator does not own, so they are required to exist.
+DEPENDENCY_FIELD_NAMES: tuple[str, ...] = _dependency_field_names()
+
 # DELETE is deliberately absent: this configurator only ever adds metadata.
 ALLOWED_METHODS = ("GET", "POST", "PATCH")
 
@@ -379,6 +402,7 @@ def configure_sales_workflow(
     changes: list[Change] = []
     company = _company_metadata(client)
     fields_by_name = {field["name"]: field for field in company.get("fields", [])}
+    _preflight_dependencies(fields_by_name)
 
     for definition in SALES_FIELDS:
         existing = fields_by_name.get(definition["name"])
@@ -501,6 +525,22 @@ def configure_sales_workflow(
             )
 
     return changes
+
+
+def _preflight_dependencies(fields_by_name: dict[str, dict[str, Any]]) -> None:
+    # Read-only, and independent of the mode: a dependency this configurator
+    # cannot create must fail identically in a dry run and an apply, before the
+    # first write, rather than after half the metadata has been created.
+    # Existence is all that is checked; these definitions belong to whoever owns
+    # them, so their type, label, and options are none of this script's business.
+    missing = [name for name in DEPENDENCY_FIELD_NAMES if name not in fields_by_name]
+    if not missing:
+        return
+    raise ConfigurationError(
+        "Twenty Company is missing fields required by managed columns or "
+        f"filters: {', '.join(missing)}. This configurator never creates them; "
+        "they are standard or enrichment-owned. Create them first, then rerun."
+    )
 
 
 def _configure_view_columns(
