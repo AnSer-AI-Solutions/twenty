@@ -24,6 +24,7 @@ COMPANY_ID = "10000000-0000-0000-0000-000000000001"
 INDEX_VIEW_ID = "20000000-0000-0000-0000-000000000001"
 QUEUE_VIEW_ID = "20000000-0000-0000-0000-000000000002"
 RECONTACT_VIEW_ID = "20000000-0000-0000-0000-000000000003"
+RANKED_VIEW_ID = "20000000-0000-0000-0000-000000000004"
 
 # What Twenty renders for the Company index view today. It is a rendered string,
 # never matched on, so every test that cares states the name it is standing in
@@ -41,6 +42,7 @@ class FakeClient:
         index_view_name: str = DEFAULT_INDEX_VIEW_NAME,
         include_sales_fields: bool = False,
         include_recontact_view: bool = False,
+        include_ranked_view: bool = True,
         include_managed_view_fields: bool = False,
         include_recontact_filters: bool = False,
         filler_object_count: int = 0,
@@ -111,6 +113,16 @@ class FakeClient:
                 "objectMetadataId": COMPANY_ID,
             },
         ]
+        if include_ranked_view:
+            self.views.append(
+                {
+                    "id": RANKED_VIEW_ID,
+                    "name": workflow.RANKED_VIEW_NAME,
+                    "key": None,
+                    "isActive": True,
+                    "objectMetadataId": COMPANY_ID,
+                }
+            )
         self.view_fields = {
             view["id"]: [
                 {
@@ -130,7 +142,12 @@ class FakeClient:
             ]
             for view in self.views
         }
+        if include_ranked_view:
+            self.view_fields[RANKED_VIEW_ID] = []
         self.view_filters: dict[str, list[dict[str, Any]]] = {
+            view["id"]: [] for view in self.views
+        }
+        self.view_sorts: dict[str, list[dict[str, Any]]] = {
             view["id"]: [] for view in self.views
         }
         self.calls: list[tuple[str, str, dict[str, Any] | None]] = []
@@ -162,6 +179,9 @@ class FakeClient:
         if method == "GET" and path.startswith("/rest/metadata/viewFilters?"):
             view_id = path.split("viewId=", 1)[1]
             return copy.deepcopy(self.view_filters[view_id])
+        if method == "GET" and path.startswith("/rest/metadata/viewSorts?"):
+            view_id = path.split("viewId=", 1)[1]
+            return copy.deepcopy(self.view_sorts[view_id])
         if method == "POST" and path == "/rest/metadata/fields":
             assert payload is not None
             field = copy.deepcopy(payload)
@@ -179,10 +199,15 @@ class FakeClient:
         if method == "POST" and path == "/rest/metadata/views":
             assert payload is not None
             view = copy.deepcopy(payload)
-            view["id"] = RECONTACT_VIEW_ID
+            view["id"] = (
+                RECONTACT_VIEW_ID
+                if payload["name"] == workflow.RECONTACT_VIEW_NAME
+                else RANKED_VIEW_ID
+            )
             self.views.append(view)
             self.view_fields[view["id"]] = []
             self.view_filters[view["id"]] = []
+            self.view_sorts[view["id"]] = []
             return copy.deepcopy(view)
         if method == "POST" and path == "/rest/metadata/viewFilters":
             assert payload is not None
@@ -192,6 +217,14 @@ class FakeClient:
             )
             self.view_filters[payload["viewId"]].append(view_filter)
             return copy.deepcopy(view_filter)
+        if method == "POST" and path == "/rest/metadata/viewSorts":
+            assert payload is not None
+            view_sort = copy.deepcopy(payload)
+            view_sort["id"] = (
+                f"view-sort-{payload['viewId']}-{payload['fieldMetadataId']}"
+            )
+            self.view_sorts[payload["viewId"]].append(view_sort)
+            return copy.deepcopy(view_sort)
         if method == "PATCH" and path.startswith("/rest/metadata/viewFields/"):
             assert payload is not None
             view_field_id = path.rsplit("/", 1)[-1]
@@ -211,6 +244,17 @@ class FakeClient:
                 for items in self.view_filters.values()
                 for item in items
                 if item["id"] == view_filter_id
+            )
+            target.update(payload)
+            return copy.deepcopy(target)
+        if method == "PATCH" and path.startswith("/rest/metadata/viewSorts/"):
+            assert payload is not None
+            view_sort_id = path.rsplit("/", 1)[-1]
+            target = next(
+                item
+                for items in self.view_sorts.values()
+                for item in items
+                if item["id"] == view_sort_id
             )
             target.update(payload)
             return copy.deepcopy(target)
@@ -275,6 +319,7 @@ class FakeClient:
         self.views.append(view)
         self.view_fields[view["id"]] = []
         self.view_filters[view["id"]] = []
+        self.view_sorts[view["id"]] = []
 
     @property
     def index_view(self) -> dict[str, Any]:
@@ -293,12 +338,16 @@ class FakeClient:
     def _add_managed_view_fields(self) -> None:
         fields = {field["name"]: field for field in self.company["fields"]}
         for view in self.views:
-            columns = (
-                workflow.RECONTACT_COLUMNS
-                if view["name"] == workflow.RECONTACT_VIEW_NAME
-                else workflow.SALES_COLUMNS
-            )
-            first_position = 0 if view["name"] == workflow.RECONTACT_VIEW_NAME else 7
+            if view["name"] == workflow.RECONTACT_VIEW_NAME:
+                columns = workflow.RECONTACT_COLUMNS
+                first_position = 0
+            elif view["name"] == workflow.RANKED_VIEW_NAME:
+                columns = workflow.RANKED_COLUMNS
+                first_position = 0
+                self.view_fields[view["id"]] = []
+            else:
+                columns = workflow.SALES_COLUMNS
+                first_position = 7
             for position, column in enumerate(columns, start=first_position):
                 self.view_fields[view["id"]].append(
                     {
@@ -324,6 +373,30 @@ class FakeClient:
                     "fieldMetadataId": field["id"],
                     "operand": definition["operand"],
                     "value": copy.deepcopy(definition["value"]),
+                }
+            )
+        ranked_view = next(
+            item for item in self.views if item["name"] == workflow.RANKED_VIEW_NAME
+        )
+        for definition in workflow.RANKED_FILTERS:
+            field = fields[definition["field"]]
+            self.view_filters[ranked_view["id"]].append(
+                {
+                    "id": f"view-filter-{ranked_view['id']}-{field['id']}",
+                    "viewId": ranked_view["id"],
+                    "fieldMetadataId": field["id"],
+                    "operand": definition["operand"],
+                    "value": copy.deepcopy(definition["value"]),
+                }
+            )
+        for definition in workflow.RANKED_SORTS:
+            field = fields[definition["field"]]
+            self.view_sorts[ranked_view["id"]].append(
+                {
+                    "id": f"view-sort-{ranked_view['id']}-{field['id']}",
+                    "viewId": ranked_view["id"],
+                    "fieldMetadataId": field["id"],
+                    "direction": definition["direction"],
                 }
             )
 
@@ -352,6 +425,10 @@ class ConfigureSalesWorkflowTests(unittest.TestCase):
             + [
                 (workflow.RECONTACT_VIEW_NAME, column["name"])
                 for column in workflow.RECONTACT_COLUMNS
+            ]
+            + [
+                (workflow.RANKED_VIEW_NAME, column["name"])
+                for column in workflow.RANKED_COLUMNS
             ],
         )
         self.assertEqual(
@@ -360,7 +437,12 @@ class ConfigureSalesWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(
             [change.name for change in changes if change.resource == "viewFilter"],
-            [definition["field"] for definition in workflow.RECONTACT_FILTERS],
+            [definition["field"] for definition in workflow.RECONTACT_FILTERS]
+            + [definition["field"] for definition in workflow.RANKED_FILTERS],
+        )
+        self.assertEqual(
+            [change.name for change in changes if change.resource == "viewSort"],
+            [definition["field"] for definition in workflow.RANKED_SORTS],
         )
         self.assertFalse(any(method != "GET" for method, _, _ in client.calls))
 
@@ -380,11 +462,16 @@ class ConfigureSalesWorkflowTests(unittest.TestCase):
         self.assertEqual(
             len(view_field_creates),
             SALES_VIEW_COUNT * len(workflow.SALES_COLUMNS)
-            + len(workflow.RECONTACT_COLUMNS),
+            + len(workflow.RECONTACT_COLUMNS)
+            + len(workflow.RANKED_COLUMNS),
         )
         self.assertEqual(
             len([call for call in writes if call[1] == "/rest/metadata/viewFilters"]),
-            len(workflow.RECONTACT_FILTERS),
+            len(workflow.RECONTACT_FILTERS) + len(workflow.RANKED_FILTERS),
+        )
+        self.assertEqual(
+            len([call for call in writes if call[1] == "/rest/metadata/viewSorts"]),
+            len(workflow.RANKED_SORTS),
         )
         existing_view_ids = {INDEX_VIEW_ID, QUEUE_VIEW_ID}
         for view_id, items in client.view_fields.items():
@@ -554,6 +641,135 @@ class ConfigureSalesWorkflowTests(unittest.TestCase):
             workflow.configure_sales_workflow(client, apply=True)
 
         self.assertFalse(any(method != "GET" for method, _, _ in client.calls))
+
+    def test_missing_ranked_view_is_created_with_guarded_queue_rules(self) -> None:
+        client = FakeClient(
+            include_sales_fields=True,
+            include_recontact_view=True,
+            include_ranked_view=False,
+        )
+
+        workflow.configure_sales_workflow(client, apply=True)
+
+        ranked_view = client.view_named(workflow.RANKED_VIEW_NAME)
+        view_create = next(
+            call
+            for call in client.calls
+            if call[0] == "POST"
+            and call[1] == "/rest/metadata/views"
+            and call[2]["name"] == workflow.RANKED_VIEW_NAME
+        )
+        self.assertEqual(view_create[2]["visibility"], "WORKSPACE")
+        self.assertEqual(view_create[2]["openRecordIn"], "SIDE_PANEL")
+
+        fields_by_id = {
+            field["id"]: field["name"] for field in client.company["fields"]
+        }
+        self.assertEqual(
+            [
+                fields_by_id[item["fieldMetadataId"]]
+                for item in sorted(
+                    client.view_fields[ranked_view["id"]],
+                    key=lambda item: item["position"],
+                )
+            ],
+            [column["name"] for column in workflow.RANKED_COLUMNS],
+        )
+        self.assertEqual(
+            [
+                (
+                    fields_by_id[item["fieldMetadataId"]],
+                    item["operand"],
+                    item["value"],
+                )
+                for item in client.view_filters[ranked_view["id"]]
+            ],
+            [
+                (
+                    definition["field"],
+                    definition["operand"],
+                    definition["value"],
+                )
+                for definition in workflow.RANKED_FILTERS
+            ],
+        )
+        self.assertEqual(
+            [
+                (
+                    fields_by_id[item["fieldMetadataId"]],
+                    item["direction"],
+                )
+                for item in client.view_sorts[ranked_view["id"]]
+            ],
+            [
+                (definition["field"], definition["direction"])
+                for definition in workflow.RANKED_SORTS
+            ],
+        )
+
+    def test_ranked_sort_drift_is_repaired_without_deletes(self) -> None:
+        client = FakeClient(
+            include_sales_fields=True,
+            include_recontact_view=True,
+            include_managed_view_fields=True,
+            include_recontact_filters=True,
+        )
+        ranked_view = client.view_named(workflow.RANKED_VIEW_NAME)
+        client.view_sorts[ranked_view["id"]][0]["direction"] = "DESC"
+
+        changes = workflow.configure_sales_workflow(client, apply=True)
+
+        self.assertEqual(
+            [(change.resource, change.name, change.action) for change in changes],
+            [("viewSort", "leadReviewRank", "update")],
+        )
+        self.assertEqual(client.view_sorts[ranked_view["id"]][0]["direction"], "ASC")
+        self.assertFalse(any(method == "DELETE" for method, _, _ in client.calls))
+
+    def test_duplicate_ranked_sorts_fail_closed(self) -> None:
+        client = FakeClient(
+            include_sales_fields=True,
+            include_recontact_view=True,
+            include_managed_view_fields=True,
+            include_recontact_filters=True,
+        )
+        ranked_view = client.view_named(workflow.RANKED_VIEW_NAME)
+        duplicate = copy.deepcopy(client.view_sorts[ranked_view["id"]][0])
+        duplicate["id"] += "-duplicate"
+        client.view_sorts[ranked_view["id"]].append(duplicate)
+
+        with self.assertRaisesRegex(workflow.ConfigurationError, "duplicate sorts"):
+            workflow.configure_sales_workflow(client, apply=True)
+
+        self.assertFalse(any(method != "GET" for method, _, _ in client.calls))
+
+    def test_ranked_queue_filters_only_current_unactioned_review_leads(self) -> None:
+        self.assertEqual(
+            workflow.RANKED_FILTERS,
+            (
+                {
+                    "field": "leadReviewQueue",
+                    "operand": "IS",
+                    "value": "true",
+                },
+                {
+                    "field": "salesActioned",
+                    "operand": "IS",
+                    "value": "false",
+                },
+                {
+                    "field": "salesLifecycleStatus",
+                    "operand": "IS",
+                    "value": ["NEW", "WORKING"],
+                },
+            ),
+        )
+        fit_score = next(
+            definition
+            for definition in workflow.SALES_FIELDS
+            if definition["name"] == "leadFitScore"
+        )
+        self.assertIn("not a conversion probability", fit_score["description"])
 
 
 def _drop_field(client: FakeClient, name: str) -> FakeClient:
@@ -978,15 +1194,26 @@ class PreflightDependencyTests(unittest.TestCase):
     ) -> None:
         self.assertEqual(
             workflow.DEPENDENCY_FIELD_NAMES,
-            ("name", "leadPhone", "leadEmail", "leadQualityTier"),
+            ("name", "leadPhone", "leadEmail", "leadQualityTier", "leadIndustry"),
         )
         self.assertFalse(
             set(workflow.DEPENDENCY_FIELD_NAMES) & workflow.OWNED_FIELD_NAMES
         )
         managed = {
             column["name"]
-            for column in (*workflow.SALES_COLUMNS, *workflow.RECONTACT_COLUMNS)
-        } | {definition["field"] for definition in workflow.RECONTACT_FILTERS}
+            for column in (
+                *workflow.SALES_COLUMNS,
+                *workflow.RECONTACT_COLUMNS,
+                *workflow.RANKED_COLUMNS,
+            )
+        } | {
+            definition["field"]
+            for definition in (
+                *workflow.RECONTACT_FILTERS,
+                *workflow.RANKED_FILTERS,
+                *workflow.RANKED_SORTS,
+            )
+        }
         self.assertEqual(
             managed - workflow.OWNED_FIELD_NAMES,
             set(workflow.DEPENDENCY_FIELD_NAMES),

@@ -26,7 +26,8 @@ INDEX_VIEW_DESCRIPTION = f"Company {INDEX_VIEW_KEY} view"
 # with the object label and are safe to resolve by name.
 QUEUE_VIEW_NAME = "Dashboard Priority Call Queue"
 RECONTACT_VIEW_NAME = "Recontact Due"
-NAMED_VIEW_NAMES = (QUEUE_VIEW_NAME, RECONTACT_VIEW_NAME)
+RANKED_VIEW_NAME = "Ranked Lead Review Queue"
+NAMED_VIEW_NAMES = (QUEUE_VIEW_NAME, RECONTACT_VIEW_NAME, RANKED_VIEW_NAME)
 MANAGED_VIEWS = (INDEX_VIEW_DESCRIPTION, *NAMED_VIEW_NAMES)
 
 SALES_FIELDS: tuple[dict[str, Any], ...] = (
@@ -248,6 +249,116 @@ SALES_FIELDS: tuple[dict[str, Any], ...] = (
         "description": "Date when a nurtured lead should return to the sales queue",
         "isNullable": True,
     },
+    {
+        "type": "NUMBER",
+        "name": "leadFitScore",
+        "label": "Fit Score",
+        "description": "Advisory relative-fit score; not a conversion probability",
+        "isNullable": True,
+    },
+    {
+        "type": "NUMBER",
+        "name": "leadFitRank",
+        "label": "Fit Rank",
+        "description": "Global rank within the scored lead population",
+        "isNullable": True,
+    },
+    {
+        "type": "SELECT",
+        "name": "leadFitPriority",
+        "label": "Fit Priority",
+        "description": "Advisory fit band; Nurture never means delete",
+        "isNullable": True,
+        "options": [
+            {
+                "color": "red",
+                "label": "A",
+                "value": "A",
+                "position": 0,
+            },
+            {
+                "color": "orange",
+                "label": "B",
+                "value": "B",
+                "position": 1,
+            },
+            {
+                "color": "yellow",
+                "label": "C",
+                "value": "C",
+                "position": 2,
+            },
+            {
+                "color": "gray",
+                "label": "Nurture",
+                "value": "NURTURE",
+                "position": 3,
+            },
+        ],
+    },
+    {
+        "type": "SELECT",
+        "name": "leadFitConfidence",
+        "label": "Fit Confidence",
+        "description": "Confidence in the public inputs supporting the fit score",
+        "isNullable": True,
+        "options": [
+            {
+                "color": "green",
+                "label": "High",
+                "value": "HIGH",
+                "position": 0,
+            },
+            {
+                "color": "yellow",
+                "label": "Medium",
+                "value": "MEDIUM",
+                "position": 1,
+            },
+            {
+                "color": "gray",
+                "label": "Low",
+                "value": "LOW",
+                "position": 2,
+            },
+        ],
+    },
+    {
+        "type": "RICH_TEXT",
+        "name": "leadFitReason",
+        "label": "Why It Fits",
+        "description": "Short explanation of the score's strongest inputs",
+        "isNullable": True,
+    },
+    {
+        "type": "TEXT",
+        "name": "leadFitModelVersion",
+        "label": "Fit Model Version",
+        "description": "Version of the reproducible scoring method",
+        "isNullable": True,
+    },
+    {
+        "type": "DATE_TIME",
+        "name": "leadFitScoredAt",
+        "label": "Fit Scored At",
+        "description": "UTC time represented by the scoring snapshot",
+        "isNullable": True,
+    },
+    {
+        "type": "BOOLEAN",
+        "name": "leadReviewQueue",
+        "label": "Fit Review Queue",
+        "description": "Included in the current diversified human-review slate",
+        "defaultValue": False,
+        "isNullable": False,
+    },
+    {
+        "type": "NUMBER",
+        "name": "leadReviewRank",
+        "label": "Review Rank",
+        "description": "Order within the current diversified review slate",
+        "isNullable": True,
+    },
 )
 
 SALES_COLUMNS: tuple[dict[str, Any], ...] = (
@@ -286,6 +397,47 @@ RECONTACT_FILTERS: tuple[dict[str, Any], ...] = (
     },
 )
 
+RANKED_COLUMNS: tuple[dict[str, Any], ...] = (
+    {"name": "name", "size": 240},
+    {"name": "leadReviewRank", "size": 120},
+    {"name": "leadFitScore", "size": 110},
+    {"name": "leadFitPriority", "size": 120},
+    {"name": "leadFitConfidence", "size": 150},
+    {"name": "leadIndustry", "size": 220},
+    {"name": "leadFitReason", "size": 380},
+    {"name": "leadPhone", "size": 180},
+    {"name": "leadEmail", "size": 240},
+    {"name": "salesActioned", "size": 110},
+    {"name": "byronReviewed", "size": 150},
+    {"name": "callStatus", "size": 150},
+    {"name": "callNotes", "size": 320},
+)
+
+RANKED_FILTERS: tuple[dict[str, Any], ...] = (
+    {
+        "field": "leadReviewQueue",
+        "operand": "IS",
+        "value": "true",
+    },
+    {
+        "field": "salesActioned",
+        "operand": "IS",
+        "value": "false",
+    },
+    {
+        "field": "salesLifecycleStatus",
+        "operand": "IS",
+        "value": ["NEW", "WORKING"],
+    },
+)
+
+RANKED_SORTS: tuple[dict[str, Any], ...] = (
+    {
+        "field": "leadReviewRank",
+        "direction": "ASC",
+    },
+)
+
 # Every Company field this configurator creates itself.
 OWNED_FIELD_NAMES: frozenset[str] = frozenset(
     definition["name"] for definition in SALES_FIELDS
@@ -294,10 +446,10 @@ OWNED_FIELD_NAMES: frozenset[str] = frozenset(
 
 def _dependency_field_names() -> tuple[str, ...]:
     names: list[str] = []
-    for column in (*SALES_COLUMNS, *RECONTACT_COLUMNS):
+    for column in (*SALES_COLUMNS, *RECONTACT_COLUMNS, *RANKED_COLUMNS):
         if column["name"] not in OWNED_FIELD_NAMES and column["name"] not in names:
             names.append(column["name"])
-    for definition in RECONTACT_FILTERS:
+    for definition in (*RECONTACT_FILTERS, *RANKED_FILTERS, *RANKED_SORTS):
         field = definition["field"]
         if field not in OWNED_FIELD_NAMES and field not in names:
             names.append(field)
@@ -320,7 +472,7 @@ ALLOWED_METHODS = ("GET", "POST", "PATCH")
 
 # Only GET is replayed. A metadata write is not idempotent, so retrying a POST
 # or PATCH that may already have been committed risks a duplicate field, view,
-# view column, or view filter.
+# view column, view filter, or view sort.
 RETRYABLE_METHODS = ("GET",)
 MAX_ATTEMPTS = 3
 
@@ -432,7 +584,7 @@ def configure_sales_workflow(
             "/rest/metadata/views?" + urlencode({"objectMetadataId": company["id"]}),
         )
     )
-    index_view, queue_view, recontact_view = _resolve_managed_views(
+    index_view, queue_view, recontact_view, ranked_view = _resolve_managed_views(
         views, company["id"]
     )
 
@@ -481,6 +633,7 @@ def configure_sales_workflow(
             )
         )
 
+    recontact_was_missing = recontact_view is None
     if recontact_view is None:
         changes.append(
             Change(
@@ -524,6 +677,7 @@ def configure_sales_workflow(
                 view=recontact_view,
                 view_details={"view": RECONTACT_VIEW_NAME},
                 fields_by_name=fields_by_name,
+                definitions=RECONTACT_FILTERS,
                 apply=apply,
             )
         )
@@ -555,23 +709,127 @@ def configure_sales_workflow(
                 )
             )
 
+    if ranked_view is None:
+        changes.append(
+            Change(
+                action="create",
+                resource="view",
+                name=RANKED_VIEW_NAME,
+                details={"type": "TABLE", "visibility": "WORKSPACE"},
+            )
+        )
+        if apply:
+            ranked_view = client.request(
+                "POST",
+                "/rest/metadata/views",
+                {
+                    "name": RANKED_VIEW_NAME,
+                    "objectMetadataId": company["id"],
+                    "icon": "IconSparkles",
+                    "type": "TABLE",
+                    "position": len(views) + (1 if recontact_was_missing else 0),
+                    "isCompact": False,
+                    "openRecordIn": "SIDE_PANEL",
+                    "visibility": "WORKSPACE",
+                },
+                expected=(201,),
+            )
+
+    if ranked_view is not None:
+        changes.extend(
+            _configure_view_columns(
+                client,
+                view=ranked_view,
+                view_details={"view": RANKED_VIEW_NAME},
+                fields_by_name=fields_by_name,
+                columns=RANKED_COLUMNS,
+                apply=apply,
+            )
+        )
+        changes.extend(
+            _configure_view_filters(
+                client,
+                view=ranked_view,
+                view_details={"view": RANKED_VIEW_NAME},
+                fields_by_name=fields_by_name,
+                definitions=RANKED_FILTERS,
+                apply=apply,
+            )
+        )
+        changes.extend(
+            _configure_view_sorts(
+                client,
+                view=ranked_view,
+                view_details={"view": RANKED_VIEW_NAME},
+                fields_by_name=fields_by_name,
+                definitions=RANKED_SORTS,
+                apply=apply,
+            )
+        )
+    else:
+        for column in RANKED_COLUMNS:
+            changes.append(
+                Change(
+                    action="create",
+                    resource="viewField",
+                    name=column["name"],
+                    details={
+                        "view": RANKED_VIEW_NAME,
+                        "isVisible": True,
+                        "size": column["size"],
+                    },
+                )
+            )
+        for definition in RANKED_FILTERS:
+            changes.append(
+                Change(
+                    action="create",
+                    resource="viewFilter",
+                    name=definition["field"],
+                    details={
+                        "view": RANKED_VIEW_NAME,
+                        "operand": definition["operand"],
+                        "value": definition["value"],
+                    },
+                )
+            )
+        for definition in RANKED_SORTS:
+            changes.append(
+                Change(
+                    action="create",
+                    resource="viewSort",
+                    name=definition["field"],
+                    details={
+                        "view": RANKED_VIEW_NAME,
+                        "direction": definition["direction"],
+                    },
+                )
+            )
+
     return changes
 
 
 def _resolve_managed_views(
     views: list[dict[str, Any]], company_id: str
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None]:
+) -> tuple[
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, Any] | None,
+    dict[str, Any] | None,
+]:
     index_view = _resolve_index_view(views, company_id)
     queue_view = _resolve_named_view(views, QUEUE_VIEW_NAME, required=True)
     recontact_view = _resolve_named_view(views, RECONTACT_VIEW_NAME, required=False)
+    ranked_view = _resolve_named_view(views, RANKED_VIEW_NAME, required=False)
     _reject_role_collisions(
         (
             (INDEX_VIEW_DESCRIPTION, index_view),
             (QUEUE_VIEW_NAME, queue_view),
             (RECONTACT_VIEW_NAME, recontact_view),
+            (RANKED_VIEW_NAME, ranked_view),
         )
     )
-    return index_view, queue_view, recontact_view
+    return index_view, queue_view, recontact_view, ranked_view
 
 
 def _resolve_index_view(
@@ -787,6 +1045,7 @@ def _configure_view_filters(
     view: dict[str, Any],
     view_details: dict[str, Any],
     fields_by_name: dict[str, dict[str, Any]],
+    definitions: tuple[dict[str, Any], ...],
     apply: bool,
 ) -> list[Change]:
     changes: list[Change] = []
@@ -808,7 +1067,7 @@ def _configure_view_filters(
         if field_id:
             filters_by_field_id[field_id] = item
 
-    for definition in RECONTACT_FILTERS:
+    for definition in definitions:
         field = fields_by_name.get(definition["field"])
         if field is None:
             if apply:
@@ -880,6 +1139,102 @@ def _configure_view_filters(
     return changes
 
 
+def _configure_view_sorts(
+    client: TwentyMetadataClient,
+    *,
+    view: dict[str, Any],
+    view_details: dict[str, Any],
+    fields_by_name: dict[str, dict[str, Any]],
+    definitions: tuple[dict[str, Any], ...],
+    apply: bool,
+) -> list[Change]:
+    changes: list[Change] = []
+    view_id = _require_id(view, f"the view for {view_details['view']}")
+    view_sorts = _items(
+        client.request(
+            "GET",
+            "/rest/metadata/viewSorts?" + urlencode({"viewId": view_id}),
+        )
+    )
+    sorts_by_field_id: dict[str, dict[str, Any]] = {}
+    for item in view_sorts:
+        field_id = item.get("fieldMetadataId")
+        if field_id in sorts_by_field_id:
+            raise ConfigurationError(
+                f'Twenty view "{view_details["view"]}" has duplicate sorts for '
+                f"field {field_id}"
+            )
+        if field_id:
+            sorts_by_field_id[field_id] = item
+
+    for definition in definitions:
+        field = fields_by_name.get(definition["field"])
+        if field is None:
+            if apply:
+                raise ConfigurationError(
+                    f"Twenty field {definition['field']} was not returned "
+                    "after creation"
+                )
+            changes.append(
+                Change(
+                    action="create",
+                    resource="viewSort",
+                    name=definition["field"],
+                    details={
+                        **view_details,
+                        "direction": definition["direction"],
+                    },
+                )
+            )
+            continue
+
+        target = {"direction": definition["direction"]}
+        existing = sorts_by_field_id.get(field["id"])
+        if existing is None:
+            changes.append(
+                Change(
+                    action="create",
+                    resource="viewSort",
+                    name=definition["field"],
+                    details={**view_details, **target},
+                )
+            )
+            if apply:
+                client.request(
+                    "POST",
+                    "/rest/metadata/viewSorts",
+                    {
+                        "viewId": view_id,
+                        "fieldMetadataId": field["id"],
+                        **target,
+                    },
+                    expected=(201,),
+                )
+            continue
+
+        update = {
+            key: value for key, value in target.items() if existing.get(key) != value
+        }
+        if not update:
+            continue
+        changes.append(
+            Change(
+                action="update",
+                resource="viewSort",
+                name=definition["field"],
+                details={**view_details, **update},
+            )
+        )
+        if apply:
+            client.request(
+                "PATCH",
+                f"/rest/metadata/viewSorts/{existing['id']}",
+                update,
+            )
+
+    return changes
+
+
 def _company_metadata(client: TwentyMetadataClient) -> dict[str, Any]:
     company = _find_company(client)
     if company is None:
@@ -943,7 +1298,7 @@ def _items(payload: Any) -> list[dict[str, Any]]:
     if isinstance(data, list):
         return data
     if isinstance(data, dict):
-        for key in ("objects", "views", "viewFields", "viewFilters"):
+        for key in ("objects", "views", "viewFields", "viewFilters", "viewSorts"):
             value = data.get(key)
             if isinstance(value, list):
                 return value
