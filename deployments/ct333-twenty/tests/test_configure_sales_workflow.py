@@ -466,6 +466,147 @@ class ConfigureSalesWorkflowTests(unittest.TestCase):
         self.assertFalse(any(method != "GET" for method, _, _ in client.calls))
 
 
+def _drop_field(client: FakeClient, name: str) -> FakeClient:
+    client.company["fields"] = [
+        field for field in client.company["fields"] if field["name"] != name
+    ]
+    return client
+
+
+def _writes(client: FakeClient) -> list[tuple[str, str, dict[str, Any] | None]]:
+    return [call for call in client.calls if call[0] != "GET"]
+
+
+# The Recontact Due view depends on the standard `name` and on the
+# enrichment-owned lead fields. This configurator must not create any of them,
+# so their absence has to stop the run before it writes anything.
+class PreflightDependencyTests(unittest.TestCase):
+    MODES = (False, True)
+
+    def test_dependencies_are_the_managed_fields_this_script_does_not_own(
+        self,
+    ) -> None:
+        self.assertEqual(
+            workflow.DEPENDENCY_FIELD_NAMES,
+            ("name", "leadPhone", "leadEmail", "leadQualityTier"),
+        )
+        self.assertFalse(
+            set(workflow.DEPENDENCY_FIELD_NAMES) & workflow.OWNED_FIELD_NAMES
+        )
+        managed = {
+            column["name"]
+            for column in (*workflow.SALES_COLUMNS, *workflow.RECONTACT_COLUMNS)
+        } | {definition["field"] for definition in workflow.RECONTACT_FILTERS}
+        self.assertEqual(
+            managed - workflow.OWNED_FIELD_NAMES,
+            set(workflow.DEPENDENCY_FIELD_NAMES),
+        )
+
+    def test_a_missing_dependency_fails_the_same_way_in_both_modes(self) -> None:
+        for name in workflow.DEPENDENCY_FIELD_NAMES:
+            messages = []
+            for apply in self.MODES:
+                with self.subTest(field=name, apply=apply):
+                    client = _drop_field(FakeClient(), name)
+
+                    with self.assertRaises(workflow.ConfigurationError) as caught:
+                        workflow.configure_sales_workflow(client, apply=apply)
+
+                    self.assertIn(name, str(caught.exception))
+                    self.assertIn("missing fields required by", str(caught.exception))
+                    self.assertEqual(_writes(client), [])
+                    messages.append(str(caught.exception))
+
+            self.assertEqual(messages[0], messages[1], msg=name)
+
+    def test_a_missing_dependency_fails_on_an_otherwise_reconciled_workspace(
+        self,
+    ) -> None:
+        for name in workflow.DEPENDENCY_FIELD_NAMES:
+            for apply in self.MODES:
+                with self.subTest(field=name, apply=apply):
+                    client = _drop_field(
+                        FakeClient(
+                            include_sales_fields=True,
+                            include_recontact_view=True,
+                            include_managed_view_fields=True,
+                            include_recontact_filters=True,
+                        ),
+                        name,
+                    )
+
+                    with self.assertRaisesRegex(
+                        workflow.ConfigurationError, "missing fields required by"
+                    ):
+                        workflow.configure_sales_workflow(client, apply=apply)
+
+                    self.assertEqual(_writes(client), [])
+
+    def test_every_missing_dependency_is_reported_at_once(self) -> None:
+        client = FakeClient()
+        for name in workflow.DEPENDENCY_FIELD_NAMES:
+            _drop_field(client, name)
+
+        with self.assertRaises(workflow.ConfigurationError) as caught:
+            workflow.configure_sales_workflow(client, apply=True)
+
+        self.assertIn(", ".join(workflow.DEPENDENCY_FIELD_NAMES), str(caught.exception))
+        self.assertEqual(_writes(client), [])
+
+    def test_an_owned_field_is_created_rather_than_required(self) -> None:
+        client = FakeClient(include_sales_fields=True)
+        _drop_field(client, "recontactAt")
+
+        changes = workflow.configure_sales_workflow(client, apply=True)
+
+        self.assertIn(
+            ("create", "field", "recontactAt"),
+            [(change.action, change.resource, change.name) for change in changes],
+        )
+
+    def test_a_complete_workspace_is_unaffected_by_the_preflight(self) -> None:
+        dry_run_client = FakeClient()
+
+        changes = workflow.configure_sales_workflow(dry_run_client, apply=False)
+
+        self.assertEqual(
+            [
+                (change.action, change.resource, change.name)
+                for change in changes
+                if change.resource == "field"
+            ],
+            [
+                ("create", "field", definition["name"])
+                for definition in workflow.SALES_FIELDS
+            ],
+        )
+        self.assertEqual(_writes(dry_run_client), [])
+        # The preflight reuses the Company metadata already in hand; it must not
+        # add a read of its own.
+        self.assertEqual(
+            len(
+                [
+                    call
+                    for call in dry_run_client.calls
+                    if call[1].startswith("/rest/metadata/objects")
+                ]
+            ),
+            1,
+        )
+
+        reconciled_client = FakeClient(
+            include_sales_fields=True,
+            include_recontact_view=True,
+            include_managed_view_fields=True,
+            include_recontact_filters=True,
+        )
+
+        self.assertEqual(
+            workflow.configure_sales_workflow(reconciled_client, apply=True), []
+        )
+        self.assertEqual(_writes(reconciled_client), [])
+
+
 def _http_error(code: int) -> HTTPError:
     return HTTPError(
         "https://twenty.example/rest/metadata/fields",
