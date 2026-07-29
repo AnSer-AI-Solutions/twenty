@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Configure the CT333 Customer and Caller custom objects.
+"""Configure the CT333 Customer and Caller custom objects and table columns.
 
 This configurator creates metadata only. It never reads or writes CRM records,
 never writes to the Company object that holds the lead pipeline, and never
@@ -124,6 +124,28 @@ CALLER_CUSTOMER_RELATION: dict[str, Any] = {
         "targetFieldIcon": "IconPhoneCall",
     },
     "inverseRelationType": "ONE_TO_MANY",
+}
+
+# ViewKey has exactly one member in v2.20 and the object-creation migration
+# stamps it on the table view it generates. The generated view is stored under
+# the literal name `All {objectLabelPlural}`, which ViewController rewrites per
+# locale on every read, so the name that comes back is a rendered string and
+# never a stable key.
+INDEX_VIEW_KEY = "INDEX"
+
+INDEX_VIEW_COLUMNS: dict[str, tuple[dict[str, Any], ...]] = {
+    CUSTOMER_OBJECT["nameSingular"]: (
+        {"name": "name", "size": 220},
+        {"name": "customerStatus", "size": 150},
+        {"name": "accountPhone", "size": 180},
+        {"name": "accountEmail", "size": 240},
+        {"name": CALLER_CUSTOMER_RELATION["inverseFieldName"], "size": 160},
+    ),
+    CALLER_OBJECT["nameSingular"]: (
+        {"name": "name", "size": 220},
+        {"name": "callerPhone", "size": 180},
+        {"name": CALLER_CUSTOMER_RELATION["field"]["name"], "size": 200},
+    ),
 }
 
 # QUERY_MAX_RECORDS clamps the server-side page size; pageInfo is followed so
@@ -305,8 +327,16 @@ def configure_crm_objects(
         objects_by_name = _managed_objects(client)
         _validate_metadata(objects_by_name)
 
+    relation_changes = _configure_caller_customer_relation(
+        client, objects_by_name, apply=apply
+    )
+    changes.extend(relation_changes)
+    if apply and relation_changes:
+        objects_by_name = _managed_objects(client)
+        _validate_metadata(objects_by_name)
+
     changes.extend(
-        _configure_caller_customer_relation(client, objects_by_name, apply=apply)
+        _configure_index_view_columns(client, objects_by_name, apply=apply)
     )
     return changes
 
@@ -359,6 +389,237 @@ def _configure_caller_customer_relation(
         expected=(201,),
     )
     return [change]
+
+
+def _configure_index_view_columns(
+    client: TwentyMetadataClient,
+    objects_by_name: dict[str, dict[str, Any]],
+    *,
+    apply: bool,
+) -> list[Change]:
+    changes: list[Change] = []
+    for object_name, columns in INDEX_VIEW_COLUMNS.items():
+        if object_name not in objects_by_name:
+            changes.extend(_planned_index_view_changes(object_name, columns))
+            continue
+        changes.extend(
+            _reconcile_index_view_columns(
+                client, objects_by_name, object_name, columns, apply=apply
+            )
+        )
+    return changes
+
+
+def _reconcile_index_view_columns(
+    client: TwentyMetadataClient,
+    objects_by_name: dict[str, dict[str, Any]],
+    object_name: str,
+    columns: tuple[dict[str, Any], ...],
+    *,
+    apply: bool,
+) -> list[Change]:
+    object_id = _managed_object_id(objects_by_name, object_name)
+    view = _resolve_index_view(client, object_name, object_id)
+    view_id = _require_id(view, f'INDEX view of "{object_name}"')
+    view_fields, view_fields_by_field_id = _index_view_fields(
+        client, object_name, view_id
+    )
+
+    fields_by_name = _fields_by_name(objects_by_name[object_name])
+    resolved = [
+        (column, fields_by_name.get(column["name"])) for column in columns
+    ]
+    missing = [column["name"] for column, field in resolved if field is None]
+    if missing and apply:
+        # Every managed column is created earlier in this run, so a gap here
+        # means the metadata read back does not match what was written. Raise
+        # before touching this view rather than reconciling it half way.
+        raise ConfigurationError(
+            f"Twenty object {object_name} is missing field(s) "
+            f"{', '.join(missing)} after creation; refusing to reconcile its "
+            "INDEX view columns"
+        )
+
+    target_ids = {
+        _require_id(field, f"field {object_name}.{column['name']}")
+        for column, field in resolved
+        if field is not None
+    }
+    # Managed columns are appended after every column this configurator does not
+    # own, so an operator's own columns keep their positions. Same rule as
+    # configure_sales_workflow.py.
+    non_target_positions = [
+        _position_of(item)
+        for item in view_fields
+        if item.get("fieldMetadataId") not in target_ids
+        and _position_of(item) is not None
+    ]
+    first_position = max(non_target_positions, default=-1) + 1
+
+    changes: list[Change] = []
+    for offset, (column, field) in enumerate(resolved):
+        target = {
+            "isVisible": True,
+            "position": first_position + offset,
+            "size": column["size"],
+        }
+        if field is None:
+            changes.append(
+                _view_field_change("update", object_name, column, target)
+            )
+            continue
+
+        existing = view_fields_by_field_id.get(field["id"])
+        if existing is None:
+            changes.append(
+                _view_field_change("create", object_name, column, target)
+            )
+            if apply:
+                client.request(
+                    "POST",
+                    "/rest/metadata/viewFields",
+                    {
+                        "viewId": view_id,
+                        "fieldMetadataId": field["id"],
+                        **target,
+                    },
+                    expected=(201,),
+                )
+            continue
+
+        update = {
+            key: value
+            for key, value in target.items()
+            if existing.get(key) != value
+        }
+        if not update:
+            continue
+        changes.append(_view_field_change("update", object_name, column, update))
+        if apply:
+            # Creating a field makes Twenty register a hidden mapping on every
+            # active INDEX view of that object, and the migration builder
+            # rejects a second mapping for the same field and view. The
+            # auto-created row is therefore patched, never re-posted.
+            client.request(
+                "PATCH",
+                "/rest/metadata/viewFields/"
+                + _require_id(
+                    existing, f"INDEX view column {object_name}.{column['name']}"
+                ),
+                update,
+            )
+    return changes
+
+
+def _resolve_index_view(
+    client: TwentyMetadataClient, object_name: str, object_id: str
+) -> dict[str, Any]:
+    views = _items(
+        client.request(
+            "GET",
+            "/rest/metadata/views?" + urlencode({"objectMetadataId": object_id}),
+        ),
+        "views",
+    )
+    index_views = [
+        view
+        for view in views
+        if isinstance(view, dict) and view.get("key") == INDEX_VIEW_KEY
+    ]
+    # A new field is only registered on INDEX views that are active and not
+    # soft-deleted, so those are the views this configurator may reconcile. The
+    # REST list drops soft-deleted views but still returns deactivated ones.
+    live_index_views = [
+        view
+        for view in index_views
+        if view.get("isActive") is not False and view.get("deletedAt") is None
+    ]
+    if len(live_index_views) != 1:
+        raise ConfigurationError(
+            f'Twenty object "{object_name}" has {len(live_index_views)} live '
+            f"INDEX views out of {len(index_views)}, expected exactly one; "
+            "refusing to guess which view to reconcile"
+        )
+    view = live_index_views[0]
+    # The objectMetadataId filter is applied server side. Re-checking it here
+    # means the Company view can never be reconciled by mistake even if that
+    # filter were ignored, rather than relying on it.
+    if view.get("objectMetadataId") != object_id:
+        raise ConfigurationError(
+            f'Twenty returned an INDEX view for "{object_name}" that belongs to '
+            f"object {view.get('objectMetadataId')!r}, expected {object_id!r}"
+        )
+    return view
+
+
+def _position_of(view_field: dict[str, Any]) -> float | None:
+    position = view_field.get("position")
+    if isinstance(position, bool) or not isinstance(position, (int, float)):
+        return None
+    return position
+
+
+def _index_view_fields(
+    client: TwentyMetadataClient, object_name: str, view_id: str
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    view_fields = [
+        item
+        for item in _items(
+            client.request(
+                "GET",
+                "/rest/metadata/viewFields?" + urlencode({"viewId": view_id}),
+            ),
+            "viewFields",
+        )
+        # Same reasoning as the view lookup: only mappings that name this view
+        # are considered, so no other view's columns can ever be patched.
+        if isinstance(item, dict) and item.get("viewId") == view_id
+    ]
+    view_fields_by_field_id: dict[str, dict[str, Any]] = {}
+    for view_field in view_fields:
+        field_id = view_field.get("fieldMetadataId")
+        if not isinstance(field_id, str) or not field_id:
+            continue
+        if field_id in view_fields_by_field_id:
+            raise ConfigurationError(
+                f'Twenty INDEX view of "{object_name}" has more than one '
+                f"mapping for field {field_id}; refusing to guess which one "
+                "to reconcile"
+            )
+        view_fields_by_field_id[field_id] = view_field
+    return view_fields, view_fields_by_field_id
+
+
+def _planned_index_view_changes(
+    object_name: str, columns: tuple[dict[str, Any], ...]
+) -> list[Change]:
+    # The object does not exist yet, so its INDEX view cannot be read. Creating
+    # the object and its fields makes Twenty register a mapping for every
+    # managed column, which is why the planned action is an update; the position
+    # is left out because it is derived from view state that does not exist yet.
+    return [
+        _view_field_change(
+            "update",
+            object_name,
+            column,
+            {"isVisible": True, "size": column["size"]},
+        )
+        for column in columns
+    ]
+
+
+def _view_field_change(
+    action: str,
+    object_name: str,
+    column: dict[str, Any],
+    details: dict[str, Any],
+) -> Change:
+    return Change(
+        action=action,
+        resource="viewField",
+        name=column["name"],
+        details={"object": object_name, "viewKey": INDEX_VIEW_KEY, **details},
+    )
 
 
 def _managed_objects(
@@ -444,12 +705,14 @@ def _managed_object_id(
         raise ConfigurationError(
             f'Twenty object "{object_name}" was not returned after creation'
         )
-    object_id = existing.get("id")
-    if not isinstance(object_id, str) or not object_id:
-        raise ConfigurationError(
-            f'Twenty object "{object_name}" was returned without an id'
-        )
-    return object_id
+    return _require_id(existing, f'object "{object_name}"')
+
+
+def _require_id(payload: dict[str, Any], description: str) -> str:
+    value = payload.get("id")
+    if not isinstance(value, str) or not value:
+        raise ConfigurationError(f"Twenty returned {description} without an id")
+    return value
 
 
 def _validate_metadata(objects_by_name: dict[str, dict[str, Any]]) -> None:
@@ -587,8 +850,8 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Configure the CT333 Customer and Caller custom objects, their "
-            "fields, and the Caller to Customer relation. The default mode is "
-            "read-only."
+            "fields, the Caller to Customer relation, and the columns of each "
+            "object's INDEX table view. The default mode is read-only."
         )
     )
     parser.add_argument(
@@ -626,6 +889,10 @@ def main() -> int:
     result = {
         "mode": "apply" if args.apply else "dry-run",
         "objects": list(MANAGED_OBJECT_NAMES),
+        "indexViewColumns": {
+            object_name: [column["name"] for column in columns]
+            for object_name, columns in INDEX_VIEW_COLUMNS.items()
+        },
         "changeCount": len(changes),
         "changes": [change.as_dict() for change in changes],
     }
