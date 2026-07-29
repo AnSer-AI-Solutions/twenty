@@ -23,6 +23,30 @@ sudo twenty-run up
 sudo twenty-run ps
 ```
 
+### Guarded arguments
+
+`up` and `down` take no arguments. Anything extra is refused with exit status
+`2` and a usage line, before the runtime token is read and before `bws` or
+`docker` is executed:
+
+```bash
+sudo twenty-run up --force-recreate   # exit 2, nothing runs
+sudo twenty-run down -v               # exit 2, nothing runs
+```
+
+Both of those are one keystroke from an outage. `--force-recreate` replaces
+every healthy container, and `-v` deletes the `db-data` volume the CRM lives
+on. Forwarding them was possible until the guard existed, so `twenty-run up`
+now always means exactly `up -d --remove-orphans` and `twenty-run down` always
+means exactly `down`; what gets deployed is whatever `compose.yaml` and the
+pinned tag say, not what was typed after the verb.
+
+`pull`, `ps`, and `logs` still forward their arguments unchanged
+(`sudo twenty-run logs -f worker`) — none of them can remove state. `config`
+ignores extra arguments, as it always has. An unknown verb exits `2` with the
+same usage line. A missing token still exits `1`, and now does so only for a
+verb the wrapper accepts.
+
 ## Sales workflow metadata
 
 `configure_sales_workflow.py` keeps the Company sales workflow fields and the
@@ -207,10 +231,16 @@ ssh ops@192.168.31.164 \
 
 ## Tests
 
-Run the focused tests for both configurators with:
+Run the focused tests for both configurators and the wrapper with:
 
 ```bash
 python3 -m unittest discover \
   -s deployments/ct333-twenty/tests \
   -p 'test_*.py'
 ```
+
+`tests/test_twenty_run.py` covers the wrapper's argument guard. It sources
+`twenty-run` with `run_compose` stubbed to record the argument vector docker
+compose would have received, and it runs the wrapper end to end against a
+`PATH` that resolves only fake `docker` and `bws` shims and a token path that
+does not exist. No test reaches Bitwarden, Docker, or CT333.

@@ -5,18 +5,38 @@ readonly TOKEN_FILE="${BWS_TOKEN_FILE:-/etc/bitwarden-sm/product-apps-runtime-re
 readonly PROJECT_ID=e6c761f9-7a4d-45a4-a780-b4860116e943
 readonly COMPOSE_DIR=/opt/twenty/deployments/ct333-twenty
 
-if [[ ! -s "$TOKEN_FILE" ]]; then
-  echo "missing Twenty runtime token: $TOKEN_FILE" >&2
-  exit 1
-fi
+usage() {
+  echo "usage: twenty-run {config|up|pull|ps|logs|down}" >&2
+  echo "       up and down take no extra arguments" >&2
+}
 
-action="${1:-up}"
-shift || true
+# up and down are the two verbs that change what is running, and one forwarded
+# flag turns either into an outage: `up --force-recreate` replaces healthy
+# containers, `down -v` deletes the db-data volume the CRM lives on. Refuse
+# extras here, before the runtime token is read and before bws or docker runs.
+require_no_extra_args() {
+  local action="$1"
+  shift
+  if (($# > 0)); then
+    echo "twenty-run $action takes no extra arguments (got: $*)" >&2
+    usage
+    exit 2
+  fi
+}
 
-export BWS_ACCESS_TOKEN
-BWS_ACCESS_TOKEN="$(tr -d '\r\n[:blank:]' < "$TOKEN_FILE")"
+load_bws_token() {
+  if [[ ! -s "$TOKEN_FILE" ]]; then
+    echo "missing Twenty runtime token: $TOKEN_FILE" >&2
+    exit 1
+  fi
+
+  export BWS_ACCESS_TOKEN
+  BWS_ACCESS_TOKEN="$(tr -d '\r\n[:blank:]' < "$TOKEN_FILE")"
+}
 
 run_compose() {
+  load_bws_token
+
   /usr/local/bin/bws run --project-id "$PROJECT_ID" -- \
     env -u BWS_ACCESS_TOKEN \
     TAG=v2.20.0 \
@@ -25,15 +45,32 @@ run_compose() {
       -f "$COMPOSE_DIR/compose.yaml" "$@"
 }
 
-case "$action" in
-  config) run_compose config --quiet ;;
-  up) run_compose up -d --remove-orphans "$@" ;;
-  pull) run_compose pull "$@" ;;
-  ps) run_compose ps "$@" ;;
-  logs) run_compose logs "$@" ;;
-  down) run_compose down "$@" ;;
-  *)
-    echo "usage: twenty-run {config|up|pull|ps|logs|down}" >&2
-    exit 2
-    ;;
-esac
+main() {
+  local action="${1:-up}"
+  shift || true
+
+  case "$action" in
+    config) run_compose config --quiet ;;
+    up)
+      require_no_extra_args up "$@"
+      run_compose up -d --remove-orphans
+      ;;
+    pull) run_compose pull "$@" ;;
+    ps) run_compose ps "$@" ;;
+    logs) run_compose logs "$@" ;;
+    down)
+      require_no_extra_args down "$@"
+      run_compose down
+      ;;
+    *)
+      usage
+      exit 2
+      ;;
+  esac
+}
+
+# Dispatch only when executed. Sourcing defines the functions without running
+# anything, which is how tests exercise the guard without a token or a daemon.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
