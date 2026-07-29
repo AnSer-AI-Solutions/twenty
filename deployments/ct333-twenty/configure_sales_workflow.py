@@ -14,9 +14,20 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-EXISTING_VIEW_NAMES = ("All Companies", "Dashboard Priority Call Queue")
+# The standard Company table. Twenty stores its name as the template
+# `All {objectLabelPlural}` and renders it against the effective object label on
+# every read, so it reads "All Companies" today and "All Leads" once the Lead
+# labels are applied, and something else again under another workspace locale.
+# `key` is the stable identifier and is what this configurator matches on.
+INDEX_VIEW_KEY = "INDEX"
+INDEX_VIEW_DESCRIPTION = f"Company {INDEX_VIEW_KEY} view"
+
+# Operator-created views. Their names are stored verbatim, so they do not move
+# with the object label and are safe to resolve by name.
+QUEUE_VIEW_NAME = "Dashboard Priority Call Queue"
 RECONTACT_VIEW_NAME = "Recontact Due"
-MANAGED_VIEW_NAMES = (*EXISTING_VIEW_NAMES, RECONTACT_VIEW_NAME)
+NAMED_VIEW_NAMES = (QUEUE_VIEW_NAME, RECONTACT_VIEW_NAME)
+MANAGED_VIEWS = (INDEX_VIEW_DESCRIPTION, *NAMED_VIEW_NAMES)
 
 SALES_FIELDS: tuple[dict[str, Any], ...] = (
     {
@@ -404,6 +415,21 @@ def configure_sales_workflow(
     fields_by_name = {field["name"]: field for field in company.get("fields", [])}
     _preflight_dependencies(fields_by_name)
 
+    # Resolved before the first write, and identically in both modes: a managed
+    # view that is missing or ambiguous must stop the run before any field
+    # exists, not after half the metadata has been created. Only the view list
+    # is read here; each view's columns are read later, once field creation has
+    # had a chance to register its own mappings on them.
+    views = _items(
+        client.request(
+            "GET",
+            "/rest/metadata/views?" + urlencode({"objectMetadataId": company["id"]}),
+        )
+    )
+    index_view, queue_view, recontact_view = _resolve_managed_views(
+        views, company["id"]
+    )
+
     for definition in SALES_FIELDS:
         existing = fields_by_name.get(definition["name"])
         if existing is not None:
@@ -430,28 +456,25 @@ def configure_sales_workflow(
         company = _company_metadata(client)
         fields_by_name = {field["name"]: field for field in company.get("fields", [])}
 
-    views = _items(
-        client.request(
-            "GET",
-            "/rest/metadata/views?" + urlencode({"objectMetadataId": company["id"]}),
-        )
-    )
-    views_by_name = {view.get("name"): view for view in views}
-    for view_name in EXISTING_VIEW_NAMES:
-        view = views_by_name.get(view_name)
-        if view is None:
-            raise ConfigurationError(f'Twenty view "{view_name}" was not found')
+    index_view_details = {
+        "view": _index_view_label(index_view),
+        "viewKey": INDEX_VIEW_KEY,
+    }
+    for view, view_details in (
+        (index_view, index_view_details),
+        (queue_view, {"view": QUEUE_VIEW_NAME}),
+    ):
         changes.extend(
             _configure_view_columns(
                 client,
                 view=view,
+                view_details=view_details,
                 fields_by_name=fields_by_name,
                 columns=SALES_COLUMNS,
                 apply=apply,
             )
         )
 
-    recontact_view = views_by_name.get(RECONTACT_VIEW_NAME)
     if recontact_view is None:
         changes.append(
             Change(
@@ -483,6 +506,7 @@ def configure_sales_workflow(
             _configure_view_columns(
                 client,
                 view=recontact_view,
+                view_details={"view": RECONTACT_VIEW_NAME},
                 fields_by_name=fields_by_name,
                 columns=RECONTACT_COLUMNS,
                 apply=apply,
@@ -492,6 +516,7 @@ def configure_sales_workflow(
             _configure_view_filters(
                 client,
                 view=recontact_view,
+                view_details={"view": RECONTACT_VIEW_NAME},
                 fields_by_name=fields_by_name,
                 apply=apply,
             )
@@ -527,6 +552,112 @@ def configure_sales_workflow(
     return changes
 
 
+def _resolve_managed_views(
+    views: list[dict[str, Any]], company_id: str
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None]:
+    index_view = _resolve_index_view(views, company_id)
+    queue_view = _resolve_named_view(views, QUEUE_VIEW_NAME, required=True)
+    recontact_view = _resolve_named_view(views, RECONTACT_VIEW_NAME, required=False)
+    _reject_role_collisions(
+        (
+            (INDEX_VIEW_DESCRIPTION, index_view),
+            (QUEUE_VIEW_NAME, queue_view),
+            (RECONTACT_VIEW_NAME, recontact_view),
+        )
+    )
+    return index_view, queue_view, recontact_view
+
+
+def _resolve_index_view(
+    views: list[dict[str, Any]], company_id: str
+) -> dict[str, Any]:
+    index_views = [
+        view
+        for view in views
+        if isinstance(view, dict) and view.get("key") == INDEX_VIEW_KEY
+    ]
+    # Creating a field makes Twenty register a hidden mapping on every INDEX view
+    # that is active and not soft-deleted, so those are the views this
+    # configurator may reconcile. The REST list drops soft-deleted views but
+    # still returns deactivated ones. Same rule as configure_crm_objects.py.
+    live_index_views = [
+        view
+        for view in index_views
+        if view.get("isActive") is not False and view.get("deletedAt") is None
+    ]
+    if len(live_index_views) != 1:
+        raise ConfigurationError(
+            f"Twenty Company has {len(live_index_views)} live {INDEX_VIEW_KEY} "
+            f"views out of {len(index_views)}, expected exactly one; refusing to "
+            "guess which view to reconcile"
+        )
+    view = live_index_views[0]
+    # The objectMetadataId filter is applied server side. Re-checking it here
+    # means no other object's index view can be reconciled by mistake even if
+    # that filter were ignored, rather than relying on it.
+    if view.get("objectMetadataId") != company_id:
+        raise ConfigurationError(
+            f"Twenty returned a Company {INDEX_VIEW_KEY} view that belongs to "
+            f"object {view.get('objectMetadataId')!r}, expected {company_id!r}"
+        )
+    return view
+
+
+def _resolve_named_view(
+    views: list[dict[str, Any]], name: str, *, required: bool
+) -> dict[str, Any] | None:
+    matches = [
+        view for view in views if isinstance(view, dict) and view.get("name") == name
+    ]
+    if len(matches) > 1:
+        raise ConfigurationError(
+            f'Twenty returned {len(matches)} views named "{name}"; refusing to '
+            "guess which one to reconcile"
+        )
+    if matches:
+        return matches[0]
+    if required:
+        raise ConfigurationError(f'Twenty view "{name}" was not found')
+    # Absent is a normal state for Recontact Due; the caller creates it.
+    return None
+
+
+def _reject_role_collisions(
+    resolved: tuple[tuple[str, dict[str, Any] | None], ...],
+) -> None:
+    # A rendered index-view name that happens to equal a managed name, or an
+    # operator who renamed the index view onto one, would otherwise make one view
+    # take two managed column sets and have the second overwrite the first.
+    roles_by_view_id: dict[str, list[str]] = {}
+    for role, view in resolved:
+        if view is None:
+            continue
+        view_id = _require_id(view, f"the view for {role}")
+        roles_by_view_id.setdefault(view_id, []).append(role)
+    for view_id, roles in roles_by_view_id.items():
+        if len(roles) > 1:
+            raise ConfigurationError(
+                f"Twenty view {view_id} resolves to more than one managed role "
+                f"({', '.join(roles)}); refusing to reconcile one view twice"
+            )
+
+
+def _index_view_label(view: dict[str, Any]) -> str:
+    # Reported for the operator's benefit only; the view was resolved by key, so
+    # whatever this renders to has no bearing on which view is written.
+    name = view.get("name")
+    if isinstance(name, str) and name:
+        return name
+    return INDEX_VIEW_DESCRIPTION
+
+
+def _require_id(payload: dict[str, Any], description: str) -> str:
+    value = payload.get("id")
+    if not isinstance(value, str) or not value:
+        raise ConfigurationError(f"Twenty returned {description} without an id")
+    return value
+
+
 def _preflight_dependencies(fields_by_name: dict[str, dict[str, Any]]) -> None:
     # Read-only, and independent of the mode: a dependency this configurator
     # cannot create must fail identically in a dry run and an apply, before the
@@ -547,15 +678,17 @@ def _configure_view_columns(
     client: TwentyMetadataClient,
     *,
     view: dict[str, Any],
+    view_details: dict[str, Any],
     fields_by_name: dict[str, dict[str, Any]],
     columns: tuple[dict[str, Any], ...],
     apply: bool,
 ) -> list[Change]:
     changes: list[Change] = []
+    view_id = _require_id(view, f"the view for {view_details['view']}")
     view_fields = _items(
         client.request(
             "GET",
-            "/rest/metadata/viewFields?" + urlencode({"viewId": view["id"]}),
+            "/rest/metadata/viewFields?" + urlencode({"viewId": view_id}),
         )
     )
     target_ids = {
@@ -589,7 +722,7 @@ def _configure_view_columns(
                     action="create",
                     resource="viewField",
                     name=column["name"],
-                    details={"view": view["name"], **target},
+                    details={**view_details, **target},
                 )
             )
             continue
@@ -601,7 +734,7 @@ def _configure_view_columns(
                     action="create",
                     resource="viewField",
                     name=column["name"],
-                    details={"view": view["name"], **target},
+                    details={**view_details, **target},
                 )
             )
             if apply:
@@ -609,7 +742,7 @@ def _configure_view_columns(
                     "POST",
                     "/rest/metadata/viewFields",
                     {
-                        "viewId": view["id"],
+                        "viewId": view_id,
                         "fieldMetadataId": field["id"],
                         **target,
                     },
@@ -629,7 +762,7 @@ def _configure_view_columns(
                 action="update",
                 resource="viewField",
                 name=column["name"],
-                details={"view": view["name"], **update},
+                details={**view_details, **update},
             )
         )
         if apply:
@@ -646,14 +779,16 @@ def _configure_view_filters(
     client: TwentyMetadataClient,
     *,
     view: dict[str, Any],
+    view_details: dict[str, Any],
     fields_by_name: dict[str, dict[str, Any]],
     apply: bool,
 ) -> list[Change]:
     changes: list[Change] = []
+    view_id = _require_id(view, f"the view for {view_details['view']}")
     view_filters = _items(
         client.request(
             "GET",
-            "/rest/metadata/viewFilters?" + urlencode({"viewId": view["id"]}),
+            "/rest/metadata/viewFilters?" + urlencode({"viewId": view_id}),
         )
     )
     filters_by_field_id: dict[str, dict[str, Any]] = {}
@@ -661,7 +796,7 @@ def _configure_view_filters(
         field_id = item.get("fieldMetadataId")
         if field_id in filters_by_field_id:
             raise ConfigurationError(
-                f'Twenty view "{view["name"]}" has duplicate filters for '
+                f'Twenty view "{view_details["view"]}" has duplicate filters for '
                 f"field {field_id}"
             )
         if field_id:
@@ -681,7 +816,7 @@ def _configure_view_filters(
                     resource="viewFilter",
                     name=definition["field"],
                     details={
-                        "view": view["name"],
+                        **view_details,
                         "operand": definition["operand"],
                         "value": definition["value"],
                     },
@@ -700,7 +835,7 @@ def _configure_view_filters(
                     action="create",
                     resource="viewFilter",
                     name=definition["field"],
-                    details={"view": view["name"], **target},
+                    details={**view_details, **target},
                 )
             )
             if apply:
@@ -708,7 +843,7 @@ def _configure_view_filters(
                     "POST",
                     "/rest/metadata/viewFilters",
                     {
-                        "viewId": view["id"],
+                        "viewId": view_id,
                         "fieldMetadataId": field["id"],
                         **target,
                     },
@@ -726,7 +861,7 @@ def _configure_view_filters(
                 action="update",
                 resource="viewFilter",
                 name=definition["field"],
-                details={"view": view["name"], **update},
+                details={**view_details, **update},
             )
         )
         if apply:
@@ -826,7 +961,7 @@ def main() -> int:
 
     result = {
         "mode": "apply" if args.apply else "dry-run",
-        "views": list(MANAGED_VIEW_NAMES),
+        "views": list(MANAGED_VIEWS),
         "changeCount": len(changes),
         "changes": [change.as_dict() for change in changes],
     }
