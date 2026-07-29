@@ -51,7 +51,9 @@ verb the wrapper accepts.
 
 `configure_sales_workflow.py` keeps the Company sales workflow fields and the
 standard Company index, `Dashboard Priority Call Queue`, and `Recontact Due`
-views reproducible through Twenty's supported metadata API.
+views reproducible through Twenty's supported metadata API. It also owns the
+`Ranked Lead Review Queue`, which is a saved table view rather than a forked
+Twenty frontend.
 
 It resolves the generated index view by its stable `key == "INDEX"` identity,
 not its rendered name. The operator-created views keep their literal
@@ -65,22 +67,36 @@ It owns these Company fields:
 - `salesActioned` (label `Actioned`) and `byronReviewed` (label
   `Byron Reviewed`)
 - `salesLifecycleStatus`, `salesDisposition`, and `recontactAt`
+- `leadFitScore`, `leadFitRank`, `leadFitPriority`, `leadFitConfidence`,
+  `leadFitReason`, `leadFitModelVersion`, and `leadFitScoredAt`
+- `leadReviewQueue` and `leadReviewRank`
 
 The two existing sales table views keep their existing columns and append
 `Actioned`, `Byron Reviewed`, `Call Notes`, `Call Attempts`, and
 `Next Follow-Up`. The configurator also appends lifecycle, disposition, and
 recontact fields. The `Recontact Due` view shows only `NURTURE` companies
-whose `Recontact At` date is in the past. The configurator does not read or
-write Company records, delete fields, remove view columns, or remove
-saved-view filters.
+whose `Recontact At` date is in the past.
+
+The `Ranked Lead Review Queue` shows the current diversified human-review
+slate, not every scored record. It filters to `Fit Review Queue = true`,
+`Actioned = false`, and lifecycle `NEW` or `WORKING`, then sorts by
+`Review Rank` ascending. Its columns expose company, review rank, fit score,
+fit band, fit confidence, industry, the short fit explanation, contact
+fields, and the existing sales action fields. Marking a lead Actioned or moving
+it out of `NEW`/`WORKING` removes it from this queue without deleting the
+record. `NURTURE` remains a retained lifecycle state.
+
+The configurator does not read or write Company records, delete fields, remove
+view columns, remove saved-view filters, or remove saved-view sorts.
 
 A preflight runs before the first write, identically in both modes. The managed
 columns also reference Company fields this configurator does not own: the
-standard `name`, plus `leadPhone`, `leadEmail`, and `leadQualityTier`, which the
-enrichment pipeline owns. If any of them is absent, the run fails with the same
-error in a dry run and in an apply, having written nothing. Add the missing
-field upstream, where it is owned; the configurator will not create it, because
-a definition invented here would drift from the owner's.
+standard `name`, plus `leadPhone`, `leadEmail`, `leadQualityTier`, and
+`leadIndustry`, which the enrichment pipeline owns. If any of them is absent,
+the run fails with the same error in a dry run and in an apply, having written
+nothing. Add the missing field upstream, where it is owned; the configurator
+will not create it, because a definition invented here would drift from the
+owner's.
 
 The Company object itself is resolved from a paginated listing. Reading only
 the first page let a workspace with enough objects report Company missing when
@@ -130,6 +146,77 @@ Repeat the dry run after apply. A reconciled workspace reports
 never replayed, because a write that may already have landed cannot be repeated
 safely; the error says the outcome may be unknown, so repeat the dry run to see
 what actually applied before retrying.
+
+## Lead-fit ranking snapshot
+
+`apply_lead_fit_ranking.py` is the separate record-level importer for the
+reviewed `client-fit-v1` snapshot under `rankings/`. The committed CSV contains
+only source identity, Twenty record identity, score/rank/band/confidence, review
+rank, and the short fit explanation. It excludes names, phone numbers, email
+addresses, and street addresses.
+
+The importer is dry-run by default and fails before the first record write
+unless all of these remain true:
+
+- the CSV SHA-256, row count, 50-row review count, and priority counts match the
+  committed manifest
+- rank and review-rank sequences are consecutive, identities are unique, and
+  scores are within 0–100
+- all lead-fit field types already match the reviewed metadata configuration
+- the input source keys exactly equal the live Twenty company population
+- every input `twenty_record_id` still matches its live `sourceLeadKey`
+
+The record payload is allowlisted to the nine `leadFit*` / `leadReview*`
+fields. It cannot update lifecycle, disposition, Actioned, Byron Reviewed,
+call status, call notes, contact fields, names, or addresses. It never deletes
+records. The score is an advisory relative priority, not a conversion
+probability, and the `NURTURE` fit band never authorizes deletion or permanent
+disqualification.
+
+After this PR is merged, stage the merged importer and snapshot over the LAN
+into the existing CT332 CRM sync container. Do not use a Proxmox node or QEMU
+guest agent as a file-transfer workspace:
+
+```bash
+ssh ops@192.168.31.164 \
+  'mkdir -p /tmp/ct333-fit-import/rankings'
+scp \
+  deployments/ct333-twenty/apply_lead_fit_ranking.py \
+  deployments/ct333-twenty/rankings/cold-lead-ranking-v1.csv \
+  deployments/ct333-twenty/rankings/cold-lead-ranking-v1.manifest.json \
+  ops@192.168.31.164:/tmp/ct333-fit-import/
+ssh ops@192.168.31.164 \
+  'mv /tmp/ct333-fit-import/cold-lead-ranking-v1.* /tmp/ct333-fit-import/rankings/ && sudo docker cp /tmp/ct333-fit-import leads-crm-sync-1:/tmp/ct333-fit-import'
+```
+
+Run the importer without `--apply` first:
+
+```bash
+ssh ops@192.168.31.164 \
+  'sudo docker exec leads-crm-sync-1 python /tmp/ct333-fit-import/apply_lead_fit_ranking.py'
+```
+
+The reviewed snapshot expects exactly 1,643 live companies and reports 50
+review-queue rows. If live delivery has added another company, stop and
+regenerate the ranking rather than weakening the exact-population preflight.
+After reviewing the dry-run counts, apply once:
+
+```bash
+ssh ops@192.168.31.164 \
+  'sudo docker exec leads-crm-sync-1 python /tmp/ct333-fit-import/apply_lead_fit_ranking.py --apply'
+```
+
+Repeat the dry run; a completed import reports `"changeCount": 0`. Then remove
+only the exact temporary directory from the container and CT:
+
+```bash
+ssh ops@192.168.31.164 \
+  'sudo docker exec leads-crm-sync-1 rm -rf /tmp/ct333-fit-import && rm -rf /tmp/ct333-fit-import'
+```
+
+If a PATCH fails, it is not retried because its outcome may be unknown. The
+importer stops and reports the number of confirmed writes. Repeat the dry run
+before resuming; already matching rows are skipped.
 
 ## Customer and Caller objects
 
@@ -354,7 +441,8 @@ Repeat the dry run after apply. A relabelled workspace reports
 
 ## Tests
 
-Run the focused tests for all three configurators and the wrapper with:
+Run the focused tests for all three configurators, the lead-fit importer, and
+the wrapper with:
 
 ```bash
 python3 -m unittest discover \
