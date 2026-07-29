@@ -92,11 +92,13 @@ custom objects that sit alongside the lead pipeline:
 - A nullable `MANY_TO_ONE` relation `caller.customer`, posted on the many side
   so Twenty generates the `customer.callers` inverse itself.
 
+It also reconciles the columns of each object's table view, described below.
+
 It creates metadata only. It does not read or write any lead record, and it
 does not touch the Company object, its fields, its labels, or its views —
 Company keeps the lead pipeline that `configure_sales_workflow.py` manages, and
-the two scripts share no state. Customer-to-Company provenance and the
-`Customers`/`Callers` view columns are deliberately out of scope here.
+the two scripts share no state. Customer-to-Company provenance is deliberately
+out of scope here.
 
 Safety properties, each covered by a test in
 `tests/test_configure_crm_objects.py`:
@@ -118,21 +120,70 @@ Safety properties, each covered by a test in
 - `DELETE` is rejected by the HTTP client, and `POST`/`PATCH` are never
   retried automatically, since a metadata write that may already have landed
   cannot be replayed safely.
+- Table columns are reconciled last, once every object and field it needs
+  exists, and a missing field raises before that object's view is touched.
 
 Creating a custom object runs a real workspace schema migration and brings its
-own system fields, an `All Customers` / `All Callers` index view, and a record
-page layout. Creating each business and relation field afterwards makes Twenty
-register a hidden view field for it on that object's index view. Those columns
-remain hidden until the separate view-column change lands; this configurator
-leaves the hidden entries alone.
+own system fields, an index view, and a record page layout. Creating each
+business and relation field afterwards makes Twenty register a hidden view
+field for it on that object's index view.
+
+### Customers and Callers table columns
+
+The same configurator reconciles the columns of each object's index view:
+
+| Customers | width | | Callers | width |
+| --- | --- | --- | --- | --- |
+| `name` | 220 | | `name` | 220 |
+| `customerStatus` | 150 | | `callerPhone` | 180 |
+| `accountPhone` | 180 | | `customer` | 200 |
+| `accountEmail` | 240 | | | |
+| `callers` | 160 | | | |
+
+No view is created and no filter is set: the index view Twenty generates with
+the object is the deliverable.
+
+- **The view is matched on `key == "INDEX"`, never by name.** Twenty stores the
+  generated view under the literal name `All {objectLabelPlural}` and rewrites
+  it on every read against the workspace locale, so the name that comes back is
+  a rendered string, not a stable key.
+- **Exactly one live index view must exist.** A second active `INDEX` view, or
+  none, raises before anything is written for that object rather than picking
+  one. Deactivated and soft-deleted index views are ignored, matching the views
+  Twenty itself registers new fields on.
+- **Auto-created mappings are patched, never re-posted.** Creating a field makes
+  Twenty add a hidden mapping on every active index view of that object, and the
+  migration builder rejects a second mapping for the same field and view, so a
+  `POST` over one would fail the run. A `POST` is issued only when a mapping is
+  genuinely absent. More than one mapping for the same field raises.
+- **Unmanaged columns are preserved.** Nothing is deleted or hidden, and the
+  managed columns are appended after the highest position this configurator
+  does not own, so an operator's own columns keep their positions and widths.
+  On a freshly created object that means the five columns Twenty creates
+  visible by default (`name`, `createdAt`, `createdBy`, `updatedAt`,
+  `updatedBy`) stay visible, and the managed block — including `name`, which
+  moves — lands after `createdAt`, `createdBy`, `updatedAt` and `updatedBy`.
+  Hiding or reordering those four is a manual choice, left to whoever owns the
+  view.
+- **Company is untouched here too.** Views are resolved from the Customer and
+  Caller object ids only, and the object id on the returned view and the view id
+  on each returned mapping are both re-checked before any write, so no Company
+  view or column can be reconciled even if the server ignored the query filter.
 
 Twenty v2.20 exposes each relation's direction but not its target object
 through the metadata REST response. The configurator therefore validates both
 named sides and their relation types, but cannot independently prove that an
 existing relation pair points to the expected object. On any failed write, its
 outcome may be unknown; run the dry run again before retrying. A partially
-applied run is safe to resume because every object or field request is atomic
-and the configurator skips compatible metadata that already exists.
+applied run is safe to resume because every object, field and column request is
+atomic and the configurator skips compatible metadata that already exists.
+
+`GET /rest/metadata/viewFields` filters out soft-deleted mappings but not
+deactivated ones, and a deactivated mapping is indistinguishable from a live one
+in that response. A target column whose only mapping had been deactivated would
+therefore be patched rather than re-created, and would stay off the table. Only
+deleting a column through the UI can produce that state; this configurator never
+does.
 
 Stream it into the CT332 CRM sync container the same way, dry run first:
 
