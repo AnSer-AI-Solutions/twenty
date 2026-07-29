@@ -150,7 +150,7 @@ what actually applied before retrying.
 ## Lead-fit ranking snapshot
 
 `apply_lead_fit_ranking.py` is the separate record-level importer for the
-reviewed `client-fit-v1` snapshot under `rankings/`. The committed CSV contains
+reviewed `client-fit-v1` v2 snapshot under `rankings/`. The committed CSV contains
 only source identity, Twenty record identity, score/rank/band/confidence, review
 rank, and the short fit explanation. It excludes names, phone numbers, email
 addresses, and street addresses.
@@ -172,9 +172,9 @@ call status, call notes, contact fields, names, or addresses. It never deletes
 records. The score is an advisory relative priority, not a conversion
 probability, and the `NURTURE` fit band never authorizes deletion or permanent
 disqualification. The importer normalizes the snapshot time to Twenty's
-millisecond precision and limits itself to 75 requests per 60 seconds, below
-the live API's 100-request limit. A full initial import therefore takes roughly
-22 minutes and may be quiet while the rate limiter sleeps.
+millisecond precision and evenly spaces at most 60 requests per 60 seconds,
+below the live API's 100-request limit. A full initial import therefore takes
+roughly 29 minutes. Apply mode reports progress every 30 confirmed writes.
 
 After this PR is merged, stage the merged importer and snapshot over the LAN
 into the existing CT332 CRM sync container. Do not use a Proxmox node or QEMU
@@ -185,17 +185,17 @@ ssh ops@192.168.31.164 \
   'mkdir -p /tmp/ct333-fit-import/rankings'
 scp \
   deployments/ct333-twenty/apply_lead_fit_ranking.py \
-  deployments/ct333-twenty/rankings/cold-lead-ranking-v1.csv \
-  deployments/ct333-twenty/rankings/cold-lead-ranking-v1.manifest.json \
+  deployments/ct333-twenty/rankings/cold-lead-ranking-v2.csv \
+  deployments/ct333-twenty/rankings/cold-lead-ranking-v2.manifest.json \
   ops@192.168.31.164:/tmp/ct333-fit-import/
 ssh ops@192.168.31.164 \
-  'mv /tmp/ct333-fit-import/cold-lead-ranking-v1.* /tmp/ct333-fit-import/rankings/ && sudo docker exec leads-crm-sync-1 mkdir -p /tmp/ct333-fit-import/rankings'
+  'mv /tmp/ct333-fit-import/cold-lead-ranking-v2.* /tmp/ct333-fit-import/rankings/ && sudo docker exec leads-crm-sync-1 mkdir -p /tmp/ct333-fit-import/rankings'
 ssh ops@192.168.31.164 \
   "sudo docker exec -i leads-crm-sync-1 sh -c 'umask 077; dd of=/tmp/ct333-fit-import/apply_lead_fit_ranking.py status=none' < /tmp/ct333-fit-import/apply_lead_fit_ranking.py"
 ssh ops@192.168.31.164 \
-  "sudo docker exec -i leads-crm-sync-1 sh -c 'umask 077; dd of=/tmp/ct333-fit-import/rankings/cold-lead-ranking-v1.csv status=none' < /tmp/ct333-fit-import/rankings/cold-lead-ranking-v1.csv"
+  "sudo docker exec -i leads-crm-sync-1 sh -c 'umask 077; dd of=/tmp/ct333-fit-import/rankings/cold-lead-ranking-v2.csv status=none' < /tmp/ct333-fit-import/rankings/cold-lead-ranking-v2.csv"
 ssh ops@192.168.31.164 \
-  "sudo docker exec -i leads-crm-sync-1 sh -c 'umask 077; dd of=/tmp/ct333-fit-import/rankings/cold-lead-ranking-v1.manifest.json status=none' < /tmp/ct333-fit-import/rankings/cold-lead-ranking-v1.manifest.json"
+  "sudo docker exec -i leads-crm-sync-1 sh -c 'umask 077; dd of=/tmp/ct333-fit-import/rankings/cold-lead-ranking-v2.manifest.json status=none' < /tmp/ct333-fit-import/rankings/cold-lead-ranking-v2.manifest.json"
 ```
 
 Run the importer without `--apply` first:
@@ -205,7 +205,7 @@ ssh ops@192.168.31.164 \
   'sudo docker exec leads-crm-sync-1 python /tmp/ct333-fit-import/apply_lead_fit_ranking.py'
 ```
 
-The reviewed snapshot expects exactly 1,643 live companies and reports 50
+The reviewed snapshot expects exactly 1,735 live companies and reports 50
 review-queue rows. If live delivery has added another company, stop and
 regenerate the ranking rather than weakening the exact-population preflight.
 After reviewing the dry-run counts, apply once:
