@@ -309,6 +309,12 @@ def _dependency_field_names() -> tuple[str, ...]:
 # definition this configurator does not own, so they are required to exist.
 DEPENDENCY_FIELD_NAMES: tuple[str, ...] = _dependency_field_names()
 
+# Clamp the server-side page size and follow pageInfo so that a workspace with
+# many objects still resolves Company instead of reporting it absent because it
+# landed past the first page.
+OBJECT_PAGE_LIMIT = 200
+MAX_OBJECT_PAGES = 25
+
 # DELETE is deliberately absent: this configurator only ever adds metadata.
 ALLOWED_METHODS = ("GET", "POST", "PATCH")
 
@@ -875,14 +881,57 @@ def _configure_view_filters(
 
 
 def _company_metadata(client: TwentyMetadataClient) -> dict[str, Any]:
-    objects = _items(client.request("GET", "/rest/metadata/objects?limit=100"))
-    company = next(
-        (item for item in objects if item.get("nameSingular") == "company"),
-        None,
-    )
+    company = _find_company(client)
     if company is None:
         raise ConfigurationError("Twenty Company object was not found")
     return company
+
+
+def _find_company(client: TwentyMetadataClient) -> dict[str, Any] | None:
+    # Company on the first page stays a single request, which is the normal
+    # case. Later pages are fetched only while Company is still missing, so a
+    # workspace with many objects cannot make this report Company absent, and a
+    # server that paginates badly past a page that already answered the
+    # question cannot fail a run that had its answer.
+    seen_cursors: set[str] = set()
+    cursor: str | None = None
+    for _ in range(MAX_OBJECT_PAGES):
+        query: dict[str, Any] = {"limit": OBJECT_PAGE_LIMIT}
+        if cursor is not None:
+            query["starting_after"] = cursor
+        payload = client.request(
+            "GET", "/rest/metadata/objects?" + urlencode(query)
+        )
+        company = next(
+            (
+                item
+                for item in _items(payload)
+                if isinstance(item, dict) and item.get("nameSingular") == "company"
+            ),
+            None,
+        )
+        if company is not None:
+            return company
+
+        page_info = payload.get("pageInfo") if isinstance(payload, dict) else None
+        if not isinstance(page_info, dict) or not page_info.get("hasNextPage"):
+            return None
+        next_cursor = page_info.get("endCursor")
+        # A page that claims a successor without naming a usable, unseen one
+        # would otherwise loop or silently truncate the search.
+        if not isinstance(next_cursor, str) or not next_cursor:
+            raise ConfigurationError(
+                "Twenty object metadata pagination did not advance"
+            )
+        if next_cursor in seen_cursors:
+            raise ConfigurationError(
+                "Twenty object metadata pagination repeated a page"
+            )
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+    raise ConfigurationError(
+        f"Twenty object metadata exceeded {MAX_OBJECT_PAGES} pages"
+    )
 
 
 def _items(payload: Any) -> list[dict[str, Any]]:

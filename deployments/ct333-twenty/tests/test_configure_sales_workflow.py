@@ -10,6 +10,7 @@ import unittest
 from typing import Any
 from unittest import mock
 from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, urlsplit
 
 MODULE_PATH = pathlib.Path(__file__).parents[1] / "configure_sales_workflow.py"
 SPEC = importlib.util.spec_from_file_location("configure_sales_workflow", MODULE_PATH)
@@ -42,7 +43,22 @@ class FakeClient:
         include_recontact_view: bool = False,
         include_managed_view_fields: bool = False,
         include_recontact_filters: bool = False,
+        filler_object_count: int = 0,
+        page_size: int | None = None,
+        response_format: str = "direct",
     ) -> None:
+        # Fillers sort ahead of Company, so any page_size below the total puts
+        # Company on a later page.
+        self.filler_objects = [
+            {
+                "id": f"00000000-0000-0000-0000-{index:012d}",
+                "nameSingular": f"filler{index}",
+                "fields": [],
+            }
+            for index in range(1, filler_object_count + 1)
+        ]
+        self.page_size = page_size
+        self.response_format = response_format
         self.company = {
             "id": COMPANY_ID,
             "nameSingular": "company",
@@ -137,7 +153,7 @@ class FakeClient:
     ) -> Any:
         self.calls.append((method, path, copy.deepcopy(payload)))
         if method == "GET" and path.startswith("/rest/metadata/objects"):
-            return {"data": [copy.deepcopy(self.company)]}
+            return self._objects_response(path)
         if method == "GET" and path.startswith("/rest/metadata/views?"):
             return copy.deepcopy(self.views)
         if method == "GET" and path.startswith("/rest/metadata/viewFields?"):
@@ -199,6 +215,43 @@ class FakeClient:
             target.update(payload)
             return copy.deepcopy(target)
         raise AssertionError(f"unexpected request: {method} {path}")
+
+    def _objects_response(self, path: str) -> Any:
+        ordered = [*self.filler_objects, copy.deepcopy(self.company)]
+        if self.page_size is None:
+            # The unpaginated shape the workspace returns today: one page and
+            # no pageInfo at all.
+            return {"data": ordered}
+
+        query = parse_qs(urlsplit(path).query)
+        limit = min(
+            int(query.get("limit", [str(workflow.OBJECT_PAGE_LIMIT)])[0]),
+            self.page_size,
+        )
+        cursor = query.get("starting_after", [None])[0]
+        if cursor is not None:
+            ids = [item["id"] for item in ordered]
+            if cursor not in ids:
+                raise AssertionError(f"unknown cursor: {cursor}")
+            ordered = ordered[ids.index(cursor) + 1 :]
+        page = ordered[:limit]
+        page_info = {
+            "hasNextPage": len(ordered) > len(page),
+            "startCursor": page[0]["id"] if page else None,
+            "endCursor": page[-1]["id"] if page else None,
+        }
+        if self.response_format == "legacy":
+            return {"data": {"objects": page}, "pageInfo": page_info}
+        return {"data": page, "pageInfo": page_info}
+
+    def object_request_count(self) -> int:
+        return len(
+            [
+                path
+                for method, path, _ in self.calls
+                if method == "GET" and path.startswith("/rest/metadata/objects")
+            ]
+        )
 
     def _add_sales_fields(self) -> None:
         existing_names = {field["name"] for field in self.company["fields"]}
@@ -536,6 +589,225 @@ def _label_agnostic(changes: list[Any]) -> list[tuple[Any, ...]]:
             )
         )
     return normalized
+
+
+class ScriptedObjectClient:
+    """Serves only GET /rest/metadata/objects, one scripted page per request.
+
+    Anything else is a failure: every case below has to stop inside the object
+    lookup, before the configurator reaches a view or a write.
+    """
+
+    def __init__(self, page_for_index: Any) -> None:
+        self.page_for_index = page_for_index
+        self.calls: list[tuple[str, str, dict[str, Any] | None]] = []
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        expected: tuple[int, ...] = (200,),
+    ) -> Any:
+        self.calls.append((method, path, copy.deepcopy(payload)))
+        if method != "GET" or not path.startswith("/rest/metadata/objects"):
+            raise AssertionError(f"unexpected request: {method} {path}")
+        return copy.deepcopy(self.page_for_index(len(self.calls) - 1))
+
+
+COMPANY_OBJECT = {
+    "id": "10000000-0000-0000-0000-000000000001",
+    "nameSingular": "company",
+    "fields": [],
+}
+
+
+def _object_page(
+    items: list[dict[str, Any]],
+    *,
+    has_next_page: bool,
+    end_cursor: Any = "cursor",
+) -> dict[str, Any]:
+    page_info: dict[str, Any] = {"hasNextPage": has_next_page}
+    if end_cursor is not ...:
+        page_info["endCursor"] = end_cursor
+    return {"data": items, "pageInfo": page_info}
+
+
+# Company is resolved from a paginated listing. Fetching only the first page
+# let a workspace with enough objects report Company missing when it was merely
+# further down, so the cursor is followed — under a bound, and refusing any
+# page sequence that cannot be trusted to terminate.
+class ObjectPaginationTests(unittest.TestCase):
+    def test_company_on_a_later_page_is_configured_identically(self) -> None:
+        paginated = FakeClient(filler_object_count=5, page_size=2)
+
+        changes = workflow.configure_sales_workflow(paginated, apply=True)
+
+        self.assertEqual(
+            changes, workflow.configure_sales_workflow(FakeClient(), apply=True)
+        )
+        self.assertTrue(
+            any("starting_after" in path for _, path, _ in paginated.calls)
+        )
+
+    def test_company_on_a_later_page_of_the_legacy_response_shape(self) -> None:
+        paginated = FakeClient(
+            filler_object_count=5, page_size=2, response_format="legacy"
+        )
+
+        changes = workflow.configure_sales_workflow(paginated, apply=True)
+
+        self.assertEqual(
+            changes, workflow.configure_sales_workflow(FakeClient(), apply=True)
+        )
+
+    def test_a_first_page_hit_stays_a_single_request(self) -> None:
+        client = FakeClient(filler_object_count=5, page_size=200)
+
+        workflow.configure_sales_workflow(client, apply=False)
+
+        self.assertEqual(client.object_request_count(), 1)
+        self.assertFalse(any("starting_after" in path for _, path, _ in client.calls))
+
+    def test_a_listing_without_page_info_is_read_as_a_single_page(self) -> None:
+        client = FakeClient()
+
+        workflow.configure_sales_workflow(client, apply=False)
+
+        self.assertEqual(client.object_request_count(), 1)
+
+    def test_company_is_used_before_the_rest_of_the_listing_is_judged(self) -> None:
+        # Company answered the question on page one. A server that then
+        # describes its next page incoherently cannot retroactively fail a
+        # lookup that already succeeded.
+        client = ScriptedObjectClient(
+            lambda index: _object_page(
+                [COMPANY_OBJECT], has_next_page=True, end_cursor=None
+            )
+        )
+
+        self.assertEqual(
+            workflow._company_metadata(client)["nameSingular"], "company"
+        )
+        self.assertEqual(len(client.calls), 1)
+
+    def test_a_terminated_listing_without_company_reports_company_missing(
+        self,
+    ) -> None:
+        pages = [
+            _object_page([{"nameSingular": "person"}], has_next_page=True),
+            _object_page([{"nameSingular": "note"}], has_next_page=False),
+        ]
+        client = ScriptedObjectClient(lambda index: pages[index])
+
+        with self.assertRaisesRegex(
+            workflow.ConfigurationError, "Company object was not found"
+        ):
+            workflow.configure_sales_workflow(client, apply=True)
+
+        self.assertEqual(_write_calls(client), [])
+
+
+class PaginationFailsClosedTests(unittest.TestCase):
+    MALFORMED_CURSORS = {
+        "null": None,
+        "absent": ...,
+        "empty": "",
+        "not a string": 7,
+        "a list": ["cursor"],
+    }
+
+    def test_a_page_promising_a_successor_it_cannot_name_fails_closed(self) -> None:
+        for label, end_cursor in self.MALFORMED_CURSORS.items():
+            with self.subTest(cursor=label):
+                client = ScriptedObjectClient(
+                    lambda index: _object_page(
+                        [{"nameSingular": "person"}],
+                        has_next_page=True,
+                        end_cursor=end_cursor,
+                    )
+                )
+
+                with self.assertRaisesRegex(
+                    workflow.ConfigurationError, "pagination did not advance"
+                ):
+                    workflow.configure_sales_workflow(client, apply=True)
+
+                self.assertEqual(len(client.calls), 1)
+                self.assertEqual(_write_calls(client), [])
+
+    def test_a_cursor_that_stands_still_fails_closed(self) -> None:
+        client = ScriptedObjectClient(
+            lambda index: _object_page(
+                [{"nameSingular": "person"}], has_next_page=True, end_cursor="stuck"
+            )
+        )
+
+        with self.assertRaisesRegex(
+            workflow.ConfigurationError, "pagination repeated a page"
+        ):
+            workflow.configure_sales_workflow(client, apply=True)
+
+        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(_write_calls(client), [])
+
+    def test_a_cursor_cycle_fails_closed_rather_than_looping(self) -> None:
+        cycle = ("a", "b", "a")
+        client = ScriptedObjectClient(
+            lambda index: _object_page(
+                [{"nameSingular": "person"}],
+                has_next_page=True,
+                end_cursor=cycle[index],
+            )
+        )
+
+        with self.assertRaisesRegex(
+            workflow.ConfigurationError, "pagination repeated a page"
+        ):
+            workflow.configure_sales_workflow(client, apply=True)
+
+        self.assertEqual(len(client.calls), 3)
+        self.assertEqual(_write_calls(client), [])
+
+    def test_an_endless_listing_is_bounded(self) -> None:
+        client = ScriptedObjectClient(
+            lambda index: _object_page(
+                [{"nameSingular": "person"}],
+                has_next_page=True,
+                end_cursor=f"cursor-{index}",
+            )
+        )
+
+        with self.assertRaisesRegex(
+            workflow.ConfigurationError,
+            f"exceeded {workflow.MAX_OBJECT_PAGES} pages",
+        ):
+            workflow.configure_sales_workflow(client, apply=True)
+
+        self.assertEqual(len(client.calls), workflow.MAX_OBJECT_PAGES)
+        self.assertEqual(_write_calls(client), [])
+
+    def test_an_unreadable_page_fails_closed(self) -> None:
+        pages = [
+            _object_page([{"nameSingular": "person"}], has_next_page=True),
+            {"data": {"unexpected": "shape"}},
+        ]
+        client = ScriptedObjectClient(lambda index: pages[index])
+
+        with self.assertRaisesRegex(
+            workflow.ConfigurationError, "did not contain a list"
+        ):
+            workflow.configure_sales_workflow(client, apply=True)
+
+        self.assertEqual(_write_calls(client), [])
+
+
+def _write_calls(
+    client: ScriptedObjectClient,
+) -> list[tuple[str, str, dict[str, Any] | None]]:
+    return [call for call in client.calls if call[0] != "GET"]
 
 
 # The Recontact Due view depends on the standard `name` and on the
