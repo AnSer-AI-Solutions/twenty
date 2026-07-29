@@ -79,7 +79,69 @@ ssh ops@192.168.31.164 \
 Repeat the dry run after apply. A reconciled workspace reports
 `"changeCount": 0`.
 
-Run the focused tests with:
+## Customer and Caller objects
+
+`configure_crm_objects.py` is a separate, standalone configurator for the two
+custom objects that sit alongside the lead pipeline:
+
+- `Customer` (`customer` / `customers`) — the post-conversion account, with
+  `customerStatus` (a required select defaulting to `ACTIVE`, plus `PAUSED` and
+  `CHURNED`), `accountPhone`, and `accountEmail`.
+- `Caller` (`caller` / `callers`) — an individual who calls in on a customer's
+  behalf, with `callerPhone`.
+- A nullable `MANY_TO_ONE` relation `caller.customer`, posted on the many side
+  so Twenty generates the `customer.callers` inverse itself.
+
+It creates metadata only. It does not read or write any lead record, and it
+does not touch the Company object, its fields, its labels, or its views —
+Company keeps the lead pipeline that `configure_sales_workflow.py` manages, and
+the two scripts share no state. Customer-to-Company provenance and the
+`Customers`/`Callers` view columns are deliberately out of scope here.
+
+Safety properties, each covered by a test in
+`tests/test_configure_crm_objects.py`:
+
+- Dry run by default; `--apply` is required to write, and a reconciled
+  workspace reports `"changeCount": 0`.
+- Object ids are always re-read from `GET /rest/metadata/objects` after a
+  create, never parsed out of a POST response, because that response shape
+  depends on the `IS_REST_METADATA_API_NEW_FORMAT_DIRECT` workspace flag. Both
+  shapes are handled, and the object listing follows `pageInfo` cursors.
+- Objects are created before their fields, and both objects exist before the
+  relation is posted.
+- The relation is create-once: an existing `caller.customer` suppresses the
+  POST rather than duplicating the pair.
+- Incompatible existing metadata — a drifted object label or plural name, a
+  field with the wrong type or select options, a relation with the wrong
+  relation type, or a half-created relation pair — raises before the first
+  write of that phase.
+- `DELETE` is rejected by the HTTP client, and `POST`/`PATCH` are never
+  retried automatically, since a metadata write that may already have landed
+  cannot be replayed safely.
+
+Creating a custom object runs a real workspace schema migration and brings its
+own system fields, an `All Customers` / `All Callers` index view, and a record
+page layout. Creating the relation field afterwards makes Twenty register a
+hidden view field for it on that object's index view; this configurator leaves
+that hidden entry alone.
+
+Stream it into the CT332 CRM sync container the same way, dry run first:
+
+```bash
+ssh ops@192.168.31.164 \
+  'sudo docker exec -i leads-crm-sync-1 python -' \
+  < deployments/ct333-twenty/configure_crm_objects.py
+```
+
+```bash
+ssh ops@192.168.31.164 \
+  'sudo docker exec -i leads-crm-sync-1 python - --apply' \
+  < deployments/ct333-twenty/configure_crm_objects.py
+```
+
+## Tests
+
+Run the focused tests for both configurators with:
 
 ```bash
 python3 -m unittest discover \
