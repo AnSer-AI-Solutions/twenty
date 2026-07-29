@@ -171,7 +171,10 @@ fields. It cannot update lifecycle, disposition, Actioned, Byron Reviewed,
 call status, call notes, contact fields, names, or addresses. It never deletes
 records. The score is an advisory relative priority, not a conversion
 probability, and the `NURTURE` fit band never authorizes deletion or permanent
-disqualification.
+disqualification. The importer normalizes the snapshot time to Twenty's
+millisecond precision and limits itself to 75 requests per 60 seconds, below
+the live API's 100-request limit. A full initial import therefore takes roughly
+22 minutes and may be quiet while the rate limiter sleeps.
 
 After this PR is merged, stage the merged importer and snapshot over the LAN
 into the existing CT332 CRM sync container. Do not use a Proxmox node or QEMU
@@ -186,7 +189,13 @@ scp \
   deployments/ct333-twenty/rankings/cold-lead-ranking-v1.manifest.json \
   ops@192.168.31.164:/tmp/ct333-fit-import/
 ssh ops@192.168.31.164 \
-  'mv /tmp/ct333-fit-import/cold-lead-ranking-v1.* /tmp/ct333-fit-import/rankings/ && sudo docker cp /tmp/ct333-fit-import leads-crm-sync-1:/tmp/ct333-fit-import'
+  'mv /tmp/ct333-fit-import/cold-lead-ranking-v1.* /tmp/ct333-fit-import/rankings/ && sudo docker exec leads-crm-sync-1 mkdir -p /tmp/ct333-fit-import/rankings'
+ssh ops@192.168.31.164 \
+  "sudo docker exec -i leads-crm-sync-1 sh -c 'umask 077; dd of=/tmp/ct333-fit-import/apply_lead_fit_ranking.py status=none' < /tmp/ct333-fit-import/apply_lead_fit_ranking.py"
+ssh ops@192.168.31.164 \
+  "sudo docker exec -i leads-crm-sync-1 sh -c 'umask 077; dd of=/tmp/ct333-fit-import/rankings/cold-lead-ranking-v1.csv status=none' < /tmp/ct333-fit-import/rankings/cold-lead-ranking-v1.csv"
+ssh ops@192.168.31.164 \
+  "sudo docker exec -i leads-crm-sync-1 sh -c 'umask 077; dd of=/tmp/ct333-fit-import/rankings/cold-lead-ranking-v1.manifest.json status=none' < /tmp/ct333-fit-import/rankings/cold-lead-ranking-v1.manifest.json"
 ```
 
 Run the importer without `--apply` first:

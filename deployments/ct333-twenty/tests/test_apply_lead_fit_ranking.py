@@ -23,7 +23,8 @@ FIRST_SOURCE_KEY = "discovered:10000000-0000-0000-0000-000000000001"
 SECOND_SOURCE_KEY = "official:10000000-0000-0000-0000-000000000002"
 FIRST_RECORD_ID = "20000000-0000-0000-0000-000000000001"
 SECOND_RECORD_ID = "20000000-0000-0000-0000-000000000002"
-SCORED_AT = "2026-07-29T20:32:27.299371Z"
+MANIFEST_SCORED_AT = "2026-07-29T20:32:27.299371Z"
+SCORED_AT = "2026-07-29T20:32:27.299Z"
 MODEL_VERSION = "client-fit-v1"
 
 
@@ -43,7 +44,7 @@ def _manifest(content: bytes) -> dict[str, Any]:
     return {
         "version": 1,
         "modelVersion": MODEL_VERSION,
-        "scoredAt": SCORED_AT,
+        "scoredAt": MANIFEST_SCORED_AT,
         "sourceSha256": hashlib.sha256(content).hexdigest(),
         "rowCount": 2,
         "reviewCount": 1,
@@ -104,6 +105,19 @@ class FakeClient:
         self.writes.append((record_id, copy.deepcopy(payload)))
 
 
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
 class RankingInputTests(unittest.TestCase):
     def _files(
         self, content: bytes, manifest: dict[str, Any]
@@ -127,6 +141,10 @@ class RankingInputTests(unittest.TestCase):
         self.assertEqual([row.rank for row in rows], [1, 2])
         self.assertEqual([row.review_rank for row in rows], [1, None])
         self.assertEqual(manifest["scoredAt"], SCORED_AT)
+
+    def test_scored_at_is_normalized_to_twenty_millisecond_precision(self) -> None:
+        self.assertEqual(ranking._iso_datetime(MANIFEST_SCORED_AT), SCORED_AT)
+        self.assertEqual(ranking._iso_datetime(SCORED_AT), SCORED_AT)
 
     def test_committed_snapshot_matches_its_reviewed_manifest(self) -> None:
         manifest = ranking._read_manifest(ranking.DEFAULT_MANIFEST_PATH)
@@ -302,6 +320,24 @@ class RankingApplyTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ranking.RankingError, "allowlist"):
             client.update_company(FIRST_RECORD_ID, {"salesActioned": True})
+
+    def test_real_client_waits_before_exceeding_its_request_budget(self) -> None:
+        clock = FakeClock()
+        client = ranking.TwentyClient(
+            "http://twenty.test",
+            "test-key",
+            requests_per_window=2,
+            window_seconds=10,
+            clock=clock.monotonic,
+            sleeper=clock.sleep,
+        )
+
+        client._wait_for_rate_slot()
+        client._wait_for_rate_slot()
+        client._wait_for_rate_slot()
+
+        self.assertEqual(clock.sleeps, [10])
+        self.assertEqual(list(client.request_times), [10])
 
 
 if __name__ == "__main__":
