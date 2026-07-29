@@ -12,7 +12,7 @@ import os
 import sys
 import time
 import uuid
-from collections import Counter, deque
+from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -24,15 +24,16 @@ from urllib.request import Request, urlopen
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-DEFAULT_RANKING_PATH = SCRIPT_DIR / "rankings" / "cold-lead-ranking-v1.csv"
-DEFAULT_MANIFEST_PATH = SCRIPT_DIR / "rankings" / "cold-lead-ranking-v1.manifest.json"
+DEFAULT_RANKING_PATH = SCRIPT_DIR / "rankings" / "cold-lead-ranking-v2.csv"
+DEFAULT_MANIFEST_PATH = SCRIPT_DIR / "rankings" / "cold-lead-ranking-v2.manifest.json"
 COMPANY_PAGE_LIMIT = 100
 MAX_COMPANY_PAGES = 100
 ALLOWED_METHODS = ("GET", "PATCH")
 RETRYABLE_METHODS = ("GET",)
 MAX_ATTEMPTS = 3
-RATE_LIMIT_REQUESTS = 75
+RATE_LIMIT_REQUESTS = 60
 RATE_LIMIT_WINDOW_SECONDS = 60.0
+PROGRESS_INTERVAL = 30
 
 REQUIRED_COLUMNS = frozenset(
     {
@@ -118,18 +119,17 @@ class TwentyClient:
         self.window_seconds = window_seconds
         self.clock = clock
         self.sleeper = sleeper
-        self.request_times: deque[float] = deque()
+        self.next_request_at: float | None = None
 
     def _wait_for_rate_slot(self) -> None:
-        while True:
+        interval = self.window_seconds / self.requests_per_window
+        now = self.clock()
+        if self.next_request_at is None:
+            self.next_request_at = now
+        while now < self.next_request_at:
+            self.sleeper(self.next_request_at - now)
             now = self.clock()
-            cutoff = now - self.window_seconds
-            while self.request_times and self.request_times[0] <= cutoff:
-                self.request_times.popleft()
-            if len(self.request_times) < self.requests_per_window:
-                self.request_times.append(now)
-                return
-            self.sleeper(self.window_seconds - (now - self.request_times[0]))
+        self.next_request_at = max(now, self.next_request_at) + interval
 
     def request(
         self,
@@ -579,6 +579,14 @@ def apply_ranking(
                     f"ranking apply stopped after {applied} successful writes: {exc}"
                 ) from exc
             applied += 1
+            if len(pending) >= PROGRESS_INTERVAL and (
+                applied % PROGRESS_INTERVAL == 0 or applied == len(pending)
+            ):
+                print(
+                    f"progress applied={applied} remaining={len(pending) - applied}",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
     return {
         "mode": "apply" if apply else "dry-run",

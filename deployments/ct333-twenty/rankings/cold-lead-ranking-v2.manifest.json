@@ -1,0 +1,21 @@
+{
+  "modelVersion": "client-fit-v1",
+  "notes": [
+    "Relative fit priority, not conversion probability.",
+    "The review queue is the diversified 50-lead slate capped at 10 per category.",
+    "NURTURE never means delete or permanently disqualify.",
+    "Snapshot refreshed after the 2026-07-29 CT332 delivery completed."
+  ],
+  "priorityCounts": {
+    "A": 50,
+    "B": 150,
+    "C": 300,
+    "NURTURE": 1235
+  },
+  "reviewCount": 50,
+  "rowCount": 1735,
+  "scoredAt": "2026-07-29T21:38:51.074627Z",
+  "sourceDatasetSha256": "6d26394961f979ed09faa0da4e009cdc34545a8deaac99f3153ca963a7a51b58",
+  "sourceSha256": "7fac577edc9132257cd28aa549d3d149fd511248f4228b8e65f2e49cb4b097c8",
+  "version": 1
+}

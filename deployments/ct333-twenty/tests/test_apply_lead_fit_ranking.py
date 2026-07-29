@@ -150,7 +150,7 @@ class RankingInputTests(unittest.TestCase):
         manifest = ranking._read_manifest(ranking.DEFAULT_MANIFEST_PATH)
         rows = ranking._read_ranking(ranking.DEFAULT_RANKING_PATH, manifest)
 
-        self.assertEqual(len(rows), 1643)
+        self.assertEqual(len(rows), 1735)
         self.assertEqual(sum(row.review_rank is not None for row in rows), 50)
         self.assertEqual(
             {row.priority for row in rows},
@@ -336,8 +336,8 @@ class RankingApplyTests(unittest.TestCase):
         client._wait_for_rate_slot()
         client._wait_for_rate_slot()
 
-        self.assertEqual(clock.sleeps, [10])
-        self.assertEqual(list(client.request_times), [10])
+        self.assertEqual(clock.sleeps, [5, 5])
+        self.assertEqual(client.next_request_at, 15)
 
 
 if __name__ == "__main__":
