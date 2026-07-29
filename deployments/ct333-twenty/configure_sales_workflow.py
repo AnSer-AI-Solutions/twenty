@@ -275,6 +275,15 @@ RECONTACT_FILTERS: tuple[dict[str, Any], ...] = (
     },
 )
 
+# DELETE is deliberately absent: this configurator only ever adds metadata.
+ALLOWED_METHODS = ("GET", "POST", "PATCH")
+
+# Only GET is replayed. A metadata write is not idempotent, so retrying a POST
+# or PATCH that may already have been committed risks a duplicate field, view,
+# view column, or view filter.
+RETRYABLE_METHODS = ("GET",)
+MAX_ATTEMPTS = 3
+
 
 class ConfigurationError(RuntimeError):
     """Raised when the live metadata cannot be changed safely."""
@@ -314,6 +323,8 @@ class TwentyMetadataClient:
         *,
         expected: tuple[int, ...] = (200,),
     ) -> Any:
+        if method not in ALLOWED_METHODS:
+            raise ConfigurationError(f"{method} is not permitted by this configurator")
         body = json.dumps(payload).encode() if payload is not None else None
         request = Request(
             self.base_url + path,
@@ -324,7 +335,8 @@ class TwentyMetadataClient:
                 "Content-Type": "application/json",
             },
         )
-        for attempt in range(1, 4):
+        attempts = MAX_ATTEMPTS if method in RETRYABLE_METHODS else 1
+        for attempt in range(1, attempts + 1):
             try:
                 with urlopen(request, timeout=self.timeout_seconds) as response:
                     if response.status not in expected:
@@ -334,20 +346,31 @@ class TwentyMetadataClient:
                     return json.load(response)
             except HTTPError as exc:
                 detail = exc.read(4096).decode(errors="replace")
-                if (exc.code == 429 or exc.code >= 500) and attempt < 3:
+                if (exc.code == 429 or exc.code >= 500) and attempt < attempts:
                     time.sleep(attempt)
                     continue
                 raise ConfigurationError(
                     f"Twenty metadata request failed with HTTP {exc.code}: {detail}"
+                    + _write_outcome_guidance(method, path)
                 ) from exc
             except (URLError, TimeoutError) as exc:
-                if attempt < 3:
+                if attempt < attempts:
                     time.sleep(attempt)
                     continue
                 raise ConfigurationError(
                     f"Twenty metadata connection failed: {exc}"
+                    + _write_outcome_guidance(method, path)
                 ) from exc
         raise AssertionError("unreachable")
+
+
+def _write_outcome_guidance(method: str, path: str) -> str:
+    if method == "GET":
+        return ""
+    return (
+        f". The outcome of {method} {path} may be unknown; "
+        "run a dry run before retrying"
+    )
 
 
 def configure_sales_workflow(

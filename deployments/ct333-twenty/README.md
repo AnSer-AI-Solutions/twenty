@@ -79,6 +79,12 @@ ssh ops@192.168.31.164 \
 Repeat the dry run after apply. A reconciled workspace reports
 `"changeCount": 0`.
 
+`DELETE` is rejected by the HTTP client, and only `GET` is retried. A `POST` or
+`PATCH` that fails on a rate limit, a server error, or a transport timeout is
+never replayed, because a write that may already have landed cannot be repeated
+safely; the error says the outcome may be unknown, so repeat the dry run to see
+what actually applied before retrying.
+
 ## Customer and Caller objects
 
 `configure_crm_objects.py` is a separate, standalone configurator for the two
