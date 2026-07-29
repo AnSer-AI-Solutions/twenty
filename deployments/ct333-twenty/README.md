@@ -112,18 +112,27 @@ Safety properties, each covered by a test in
 - The relation is create-once: an existing `caller.customer` suppresses the
   POST rather than duplicating the pair.
 - Incompatible existing metadata — a drifted object label or plural name, a
-  field with the wrong type or select options, a relation with the wrong
-  relation type, or a half-created relation pair — raises before the first
-  write of that phase.
+  field with the wrong type, nullability, default, or select options, a
+  relation with a missing or wrong relation type, or a half-created relation
+  pair — raises before the first write of that phase.
 - `DELETE` is rejected by the HTTP client, and `POST`/`PATCH` are never
   retried automatically, since a metadata write that may already have landed
   cannot be replayed safely.
 
 Creating a custom object runs a real workspace schema migration and brings its
 own system fields, an `All Customers` / `All Callers` index view, and a record
-page layout. Creating the relation field afterwards makes Twenty register a
-hidden view field for it on that object's index view; this configurator leaves
-that hidden entry alone.
+page layout. Creating each business and relation field afterwards makes Twenty
+register a hidden view field for it on that object's index view. Those columns
+remain hidden until the separate view-column change lands; this configurator
+leaves the hidden entries alone.
+
+Twenty v2.20 exposes each relation's direction but not its target object
+through the metadata REST response. The configurator therefore validates both
+named sides and their relation types, but cannot independently prove that an
+existing relation pair points to the expected object. On any failed write, its
+outcome may be unknown; run the dry run again before retrying. A partially
+applied run is safe to resume because every object or field request is atomic
+and the configurator skips compatible metadata that already exists.
 
 Stream it into the CT332 CRM sync container the same way, dry run first:
 

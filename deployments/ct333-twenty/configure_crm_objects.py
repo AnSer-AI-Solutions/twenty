@@ -115,7 +115,6 @@ CALLER_CUSTOMER_RELATION: dict[str, Any] = {
         "type": "RELATION",
         "name": "customer",
         "label": "Customer",
-        "description": "Customer this caller belongs to",
         "icon": "IconBuildingStore",
         "isNullable": True,
     },
@@ -209,6 +208,7 @@ class TwentyMetadataClient:
                     continue
                 raise ConfigurationError(
                     f"Twenty metadata request failed with HTTP {exc.code}: {detail}"
+                    + _write_outcome_guidance(method, path)
                 ) from exc
             except (URLError, TimeoutError) as exc:
                 if attempt < attempts:
@@ -216,8 +216,18 @@ class TwentyMetadataClient:
                     continue
                 raise ConfigurationError(
                     f"Twenty metadata connection failed: {exc}"
+                    + _write_outcome_guidance(method, path)
                 ) from exc
         raise AssertionError("unreachable")
+
+
+def _write_outcome_guidance(method: str, path: str) -> str:
+    if method == "GET":
+        return ""
+    return (
+        f". The outcome of {method} {path} may be unknown; "
+        "run a dry run before retrying"
+    )
 
 
 def configure_crm_objects(
@@ -471,7 +481,9 @@ def _validate_existing_object(
 def _validate_existing_field(
     existing: dict[str, Any], definition: dict[str, Any], object_name: str
 ) -> None:
-    for key in ("type", "label"):
+    for key in ("type", "label", "isNullable", "defaultValue"):
+        if key not in definition:
+            continue
         if existing.get(key) != definition.get(key):
             raise ConfigurationError(
                 f"Twenty field {object_name}.{definition['name']} has {key} "
@@ -488,13 +500,23 @@ def _validate_existing_field(
         )
 
 
-def _select_option_values(options: list[dict[str, Any]]) -> list[Any]:
+def _select_option_values(
+    options: list[dict[str, Any]],
+) -> list[tuple[Any, Any, Any, Any]]:
     # Options are compared in position order so that a workspace returning them
     # in a different array order is not mistaken for drift. A missing or
     # non-numeric position falls back to 0, which keeps the sort stable rather
     # than raising on a comparison.
     ordered = sorted(options, key=_option_position)
-    return [option.get("value") for option in ordered]
+    return [
+        (
+            option.get("value"),
+            option.get("label"),
+            option.get("color"),
+            option.get("position"),
+        )
+        for option in ordered
+    ]
 
 
 def _option_position(option: dict[str, Any]) -> float:
@@ -554,9 +576,7 @@ def _validate_relation_type(
 ) -> None:
     settings = existing.get("settings")
     actual = settings.get("relationType") if isinstance(settings, dict) else None
-    # Relation settings are not guaranteed to be exposed on every workspace, so
-    # only a present-and-different relationType counts as incompatible.
-    if actual is not None and actual != expected:
+    if actual != expected:
         raise ConfigurationError(
             f"Twenty field {qualified_name} has relation type {actual!r}, "
             f"expected {expected!r}"

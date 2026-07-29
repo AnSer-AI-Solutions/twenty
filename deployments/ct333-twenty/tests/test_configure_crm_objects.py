@@ -265,6 +265,28 @@ class FakeClient:
         return [call for call in self.calls if call[0] != "GET"]
 
 
+class FailingWriteClient(FakeClient):
+    def __init__(self, *, fail_on_write_number: int) -> None:
+        super().__init__()
+        self.fail_on_write_number = fail_on_write_number
+        self.write_attempts = 0
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        expected: tuple[int, ...] = (200,),
+    ) -> Any:
+        if method != "GET":
+            self.write_attempts += 1
+            if self.write_attempts == self.fail_on_write_number:
+                self.calls.append((method, path, copy.deepcopy(payload)))
+                raise crm.ConfigurationError("simulated metadata write failure")
+        return super().request(method, path, payload, expected=expected)
+
+
 def _change_tuples(changes: list[Any]) -> list[tuple[str, str, str]]:
     return [(change.action, change.resource, change.name) for change in changes]
 
@@ -415,6 +437,31 @@ class IdempotencyTests(unittest.TestCase):
             1,
         )
 
+    def test_partial_apply_is_recoverable_by_rerunning(self) -> None:
+        client = FailingWriteClient(fail_on_write_number=2)
+
+        with self.assertRaisesRegex(
+            crm.ConfigurationError, "simulated metadata write failure"
+        ):
+            crm.configure_crm_objects(client, apply=True)
+
+        self.assertEqual(
+            [item["nameSingular"] for item in client.objects],
+            ["company", "customer"],
+        )
+
+        remaining = crm.configure_crm_objects(client, apply=True)
+
+        self.assertEqual(
+            _change_tuples(remaining),
+            [
+                entry
+                for entry in EXPECTED_FULL_CHANGES
+                if entry != ("create", "object", "customer")
+            ],
+        )
+        self.assertEqual(crm.configure_crm_objects(client, apply=True), [])
+
 
 class DriftTests(unittest.TestCase):
     def test_object_label_drift_fails_before_writes(self) -> None:
@@ -456,6 +503,39 @@ class DriftTests(unittest.TestCase):
 
         self.assertEqual(client.writes, [])
 
+    def test_field_nullability_drift_fails_before_writes(self) -> None:
+        client = FakeClient(include_objects=True, include_fields=True)
+        client.field_by_name("customer", "customerStatus")["isNullable"] = True
+
+        with self.assertRaisesRegex(crm.ConfigurationError, "has isNullable"):
+            crm.configure_crm_objects(client, apply=True)
+
+        self.assertEqual(client.writes, [])
+
+    def test_field_default_drift_fails_before_writes(self) -> None:
+        client = FakeClient(include_objects=True, include_fields=True)
+        client.field_by_name("customer", "customerStatus")["defaultValue"] = (
+            "'CHURNED'"
+        )
+
+        with self.assertRaisesRegex(crm.ConfigurationError, "has defaultValue"):
+            crm.configure_crm_objects(client, apply=True)
+
+        self.assertEqual(client.writes, [])
+
+    def test_select_option_label_and_color_drift_fails_before_writes(self) -> None:
+        client = FakeClient(include_objects=True, include_fields=True)
+        status = client.field_by_name("customer", "customerStatus")
+        status["options"][0]["label"] = "Live"
+        status["options"][0]["color"] = "red"
+
+        with self.assertRaisesRegex(
+            crm.ConfigurationError, "unexpected select options"
+        ):
+            crm.configure_crm_objects(client, apply=True)
+
+        self.assertEqual(client.writes, [])
+
     def test_select_options_returned_out_of_order_are_accepted(self) -> None:
         client = FakeClient(
             include_objects=True, include_fields=True, include_relation=True
@@ -472,6 +552,15 @@ class DriftTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(crm.ConfigurationError, "has relation type"):
+            crm.configure_crm_objects(client, apply=True)
+
+        self.assertEqual(client.writes, [])
+
+    def test_missing_relation_settings_fail_before_writes(self) -> None:
+        client = FakeClient(include_objects=True, include_relation=True)
+        client.field_by_name("caller", "customer").pop("settings")
+
+        with self.assertRaisesRegex(crm.ConfigurationError, "relation type None"):
             crm.configure_crm_objects(client, apply=True)
 
         self.assertEqual(client.writes, [])
@@ -641,7 +730,10 @@ class ClientPolicyTests(unittest.TestCase):
                     ) as opener,
                     mock.patch.object(crm.time, "sleep") as sleeper,
                 ):
-                    with self.assertRaises(crm.ConfigurationError):
+                    with self.assertRaisesRegex(
+                        crm.ConfigurationError,
+                        "outcome of .* may be unknown; run a dry run",
+                    ):
                         client.request(method, "/rest/metadata/fields", {})
 
                 self.assertEqual(opener.call_count, 1)
