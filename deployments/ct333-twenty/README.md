@@ -50,13 +50,13 @@ verb the wrapper accepts.
 ## Sales workflow metadata
 
 `configure_sales_workflow.py` keeps the Company sales workflow fields and the
-`All Companies`, `Dashboard Priority Call Queue`, and `Recontact Due` views
-reproducible through Twenty's supported metadata API.
+standard Company index, `Dashboard Priority Call Queue`, and `Recontact Due`
+views reproducible through Twenty's supported metadata API.
 
-It resolves those views by name, and `All Companies` is the name Twenty renders
-for the generated Company index view. Applying the Lead labels changes that
-rendered name, so run this configurator first; see
-[Lead labels](#lead-labels).
+It resolves the generated index view by its stable `key == "INDEX"` identity,
+not its rendered name. The operator-created views keep their literal
+name-based identity. Applying the Lead labels can therefore happen before or
+after sales-workflow reconciliation; see [Lead labels](#lead-labels).
 
 It owns these Company fields:
 
@@ -277,20 +277,19 @@ related morph field names only when a *name* or the label identifier changes.
 Every Company field, saved view, view column, saved filter, and record is left
 exactly as it was.
 
-### The generated `All Companies` view name does change
+### The generated index view follows the effective label safely
 
 The Company index view is stored as the literal template
 `All {objectLabelPlural}`, and `GET /rest/metadata/views` renders it against the
 effective object label on every read. Once the labels are applied that view
 comes back named `All Leads`.
 
-`configure_sales_workflow.py` resolves that view by name, so run it *before*
-applying the labels. Afterwards it raises
-`Twenty view "All Companies" was not found` and stops before touching any view,
-which makes the wrong order safe but unproductive. `Dashboard Priority Call
-Queue` and `Recontact Due` are literal names and are unaffected. This is the
-same hazard that makes `configure_crm_objects.py` match its index views on
-`key == "INDEX"` instead of by name.
+`configure_sales_workflow.py` matches that view on `key == "INDEX"`, requires
+exactly one live match for Company, and reports the rendered name only for
+operator-readable output. The same reconciliation therefore works when the
+view reads `All Companies`, `All Leads`, or a localized name. `Dashboard
+Priority Call Queue` and `Recontact Due` remain literal names and are
+unaffected.
 
 ### Safety properties
 

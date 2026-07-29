@@ -19,17 +19,32 @@ sys.modules[SPEC.name] = workflow
 SPEC.loader.exec_module(workflow)
 
 
+COMPANY_ID = "10000000-0000-0000-0000-000000000001"
+INDEX_VIEW_ID = "20000000-0000-0000-0000-000000000001"
+QUEUE_VIEW_ID = "20000000-0000-0000-0000-000000000002"
+RECONTACT_VIEW_ID = "20000000-0000-0000-0000-000000000003"
+
+# What Twenty renders for the Company index view today. It is a rendered string,
+# never matched on, so every test that cares states the name it is standing in
+# for explicitly.
+DEFAULT_INDEX_VIEW_NAME = "All Companies"
+
+# The index view and the Dashboard Priority Call Queue both carry SALES_COLUMNS.
+SALES_VIEW_COUNT = 2
+
+
 class FakeClient:
     def __init__(
         self,
         *,
+        index_view_name: str = DEFAULT_INDEX_VIEW_NAME,
         include_sales_fields: bool = False,
         include_recontact_view: bool = False,
         include_managed_view_fields: bool = False,
         include_recontact_filters: bool = False,
     ) -> None:
         self.company = {
-            "id": "10000000-0000-0000-0000-000000000001",
+            "id": COMPANY_ID,
             "nameSingular": "company",
             "fields": [
                 {
@@ -66,12 +81,18 @@ class FakeClient:
         }
         self.views = [
             {
-                "id": "20000000-0000-0000-0000-000000000001",
-                "name": "All Companies",
+                "id": INDEX_VIEW_ID,
+                "name": index_view_name,
+                "key": workflow.INDEX_VIEW_KEY,
+                "isActive": True,
+                "objectMetadataId": COMPANY_ID,
             },
             {
-                "id": "20000000-0000-0000-0000-000000000002",
-                "name": "Dashboard Priority Call Queue",
+                "id": QUEUE_VIEW_ID,
+                "name": workflow.QUEUE_VIEW_NAME,
+                "key": None,
+                "isActive": True,
+                "objectMetadataId": COMPANY_ID,
             },
         ]
         self.view_fields = {
@@ -142,7 +163,7 @@ class FakeClient:
         if method == "POST" and path == "/rest/metadata/views":
             assert payload is not None
             view = copy.deepcopy(payload)
-            view["id"] = "20000000-0000-0000-0000-000000000003"
+            view["id"] = RECONTACT_VIEW_ID
             self.views.append(view)
             self.view_fields[view["id"]] = []
             self.view_filters[view["id"]] = []
@@ -192,12 +213,26 @@ class FakeClient:
         if any(view["name"] == workflow.RECONTACT_VIEW_NAME for view in self.views):
             return
         view = {
-            "id": "20000000-0000-0000-0000-000000000003",
+            "id": RECONTACT_VIEW_ID,
             "name": workflow.RECONTACT_VIEW_NAME,
+            "key": None,
+            "isActive": True,
+            "objectMetadataId": COMPANY_ID,
         }
         self.views.append(view)
         self.view_fields[view["id"]] = []
         self.view_filters[view["id"]] = []
+
+    @property
+    def index_view(self) -> dict[str, Any]:
+        return next(
+            view
+            for view in self.views
+            if view.get("key") == workflow.INDEX_VIEW_KEY
+        )
+
+    def view_named(self, name: str) -> dict[str, Any]:
+        return next(view for view in self.views if view["name"] == name)
 
     def _add_managed_view_fields(self) -> None:
         fields = {field["name"]: field for field in self.company["fields"]}
@@ -255,7 +290,7 @@ class ConfigureSalesWorkflowTests(unittest.TestCase):
             ],
             [
                 (view_name, column["name"])
-                for view_name in workflow.EXISTING_VIEW_NAMES
+                for view_name in (DEFAULT_INDEX_VIEW_NAME, workflow.QUEUE_VIEW_NAME)
                 for column in workflow.SALES_COLUMNS
             ]
             + [
@@ -288,18 +323,14 @@ class ConfigureSalesWorkflowTests(unittest.TestCase):
         ]
         self.assertEqual(
             len(view_field_creates),
-            len(workflow.EXISTING_VIEW_NAMES) * len(workflow.SALES_COLUMNS)
+            SALES_VIEW_COUNT * len(workflow.SALES_COLUMNS)
             + len(workflow.RECONTACT_COLUMNS),
         )
         self.assertEqual(
             len([call for call in writes if call[1] == "/rest/metadata/viewFilters"]),
             len(workflow.RECONTACT_FILTERS),
         )
-        existing_view_ids = {
-            view["id"]
-            for view in client.views
-            if view["name"] in workflow.EXISTING_VIEW_NAMES
-        }
+        existing_view_ids = {INDEX_VIEW_ID, QUEUE_VIEW_ID}
         for view_id, items in client.view_fields.items():
             if view_id not in existing_view_ids:
                 continue
@@ -372,9 +403,7 @@ class ConfigureSalesWorkflowTests(unittest.TestCase):
             include_managed_view_fields=True,
             include_recontact_filters=True,
         )
-        standard_view = next(
-            view for view in client.views if view["name"] == "All Companies"
-        )
+        standard_view = client.index_view
         target_names = {column["name"] for column in workflow.SALES_COLUMNS}
         fields_by_id = {
             field["id"]: field["name"] for field in client.company["fields"]
@@ -389,7 +418,7 @@ class ConfigureSalesWorkflowTests(unittest.TestCase):
             change
             for change in changes
             if change.resource == "viewField"
-            and change.details["view"] == "All Companies"
+            and change.details.get("viewKey") == workflow.INDEX_VIEW_KEY
         ]
         self.assertEqual(
             [change.name for change in standard_changes],
@@ -397,7 +426,12 @@ class ConfigureSalesWorkflowTests(unittest.TestCase):
         )
         self.assertTrue(
             all(
-                change.details == {"view": "All Companies", "isVisible": True}
+                change.details
+                == {
+                    "view": DEFAULT_INDEX_VIEW_NAME,
+                    "viewKey": workflow.INDEX_VIEW_KEY,
+                    "isVisible": True,
+                }
                 for change in standard_changes
             )
         )
@@ -475,6 +509,33 @@ def _drop_field(client: FakeClient, name: str) -> FakeClient:
 
 def _writes(client: FakeClient) -> list[tuple[str, str, dict[str, Any] | None]]:
     return [call for call in client.calls if call[0] != "GET"]
+
+
+def _index_view_changes(changes: list[Any]) -> list[Any]:
+    return [
+        change
+        for change in changes
+        if change.details.get("viewKey") == workflow.INDEX_VIEW_KEY
+    ]
+
+
+def _label_agnostic(changes: list[Any]) -> list[tuple[Any, ...]]:
+    # The index view's reported label is a rendered string. Every other part of
+    # every change must come out identical whatever that string happens to be.
+    normalized = []
+    for change in changes:
+        details = dict(change.details)
+        if details.get("viewKey") == workflow.INDEX_VIEW_KEY:
+            details["view"] = workflow.INDEX_VIEW_KEY
+        normalized.append(
+            (
+                change.action,
+                change.resource,
+                change.name,
+                sorted(details.items(), key=lambda item: item[0]),
+            )
+        )
+    return normalized
 
 
 # The Recontact Due view depends on the standard `name` and on the
@@ -605,6 +666,256 @@ class PreflightDependencyTests(unittest.TestCase):
             workflow.configure_sales_workflow(reconciled_client, apply=True), []
         )
         self.assertEqual(_writes(reconciled_client), [])
+
+
+# Twenty stores the Company index view's name as `All {objectLabelPlural}` and
+# renders it on every read, so relabelling Company to Lead — or running under any
+# other workspace locale — changes the name that comes back. The view is matched
+# on `key == "INDEX"` so that none of this reaches the write paths.
+class IndexViewResolutionTests(unittest.TestCase):
+    MODES = (False, True)
+
+    RENDERED_NAMES = (
+        "All Companies",
+        "All Leads",
+        "Alle Leads",
+        "Tous les prospects",
+        "すべてのリード",
+    )
+
+    OTHER_VIEW_ID = "20000000-0000-0000-0000-0000000000ff"
+
+    def test_the_index_view_is_reconciled_after_company_is_relabelled_lead(
+        self,
+    ) -> None:
+        client = FakeClient(index_view_name="All Leads")
+
+        changes = workflow.configure_sales_workflow(client, apply=True)
+
+        index_changes = _index_view_changes(changes)
+        self.assertEqual(
+            [change.name for change in index_changes],
+            [column["name"] for column in workflow.SALES_COLUMNS],
+        )
+        # The rendered name is reported, because that is what the operator sees
+        # in the UI, but it played no part in finding the view.
+        self.assertTrue(
+            all(change.details["view"] == "All Leads" for change in index_changes)
+        )
+        posted = [
+            call
+            for call in _writes(client)
+            if call[1] == "/rest/metadata/viewFields"
+            and call[2] is not None
+            and call[2]["viewId"] == INDEX_VIEW_ID
+        ]
+        self.assertEqual(len(posted), len(workflow.SALES_COLUMNS))
+
+    def test_writes_are_identical_under_any_rendered_name(self) -> None:
+        baseline = FakeClient(index_view_name=DEFAULT_INDEX_VIEW_NAME)
+        workflow.configure_sales_workflow(baseline, apply=True)
+
+        for name in self.RENDERED_NAMES:
+            with self.subTest(name=name):
+                client = FakeClient(index_view_name=name)
+
+                workflow.configure_sales_workflow(client, apply=True)
+
+                self.assertEqual(_writes(client), _writes(baseline))
+
+    def test_reported_changes_differ_only_by_the_rendered_label(self) -> None:
+        baseline = _label_agnostic(
+            workflow.configure_sales_workflow(
+                FakeClient(index_view_name=DEFAULT_INDEX_VIEW_NAME), apply=False
+            )
+        )
+
+        for name in self.RENDERED_NAMES:
+            with self.subTest(name=name):
+                changes = workflow.configure_sales_workflow(
+                    FakeClient(index_view_name=name), apply=False
+                )
+
+                self.assertEqual(_label_agnostic(changes), baseline)
+
+    def test_an_index_view_without_a_rendered_name_is_still_reconciled(self) -> None:
+        for case, mutate in (
+            ("absent", lambda view: view.pop("name")),
+            ("empty", lambda view: view.update({"name": ""})),
+            ("not a string", lambda view: view.update({"name": None})),
+        ):
+            with self.subTest(case=case):
+                client = FakeClient()
+                mutate(client.index_view)
+
+                changes = workflow.configure_sales_workflow(client, apply=True)
+
+                index_changes = _index_view_changes(changes)
+                self.assertEqual(
+                    [change.name for change in index_changes],
+                    [column["name"] for column in workflow.SALES_COLUMNS],
+                )
+                self.assertTrue(
+                    all(
+                        change.details["view"] == workflow.INDEX_VIEW_DESCRIPTION
+                        for change in index_changes
+                    )
+                )
+
+    def test_a_missing_index_view_fails_closed_before_any_write(self) -> None:
+        for case, mutate in (
+            ("no index view at all", lambda client: client.views.remove(
+                client.index_view
+            )),
+            ("key absent", lambda client: client.index_view.pop("key")),
+            ("key renamed", lambda client: client.index_view.update({"key": "CUSTOM"})),
+            ("deactivated", lambda client: client.index_view.update(
+                {"isActive": False}
+            )),
+            ("soft deleted", lambda client: client.index_view.update(
+                {"deletedAt": "2026-07-29T00:00:00.000Z"}
+            )),
+        ):
+            for apply in self.MODES:
+                with self.subTest(case=case, apply=apply):
+                    # No sales field exists yet, so an apply that did not fail
+                    # closed first would have created ten of them.
+                    client = FakeClient()
+                    mutate(client)
+
+                    with self.assertRaisesRegex(
+                        workflow.ConfigurationError,
+                        f"0 live {workflow.INDEX_VIEW_KEY} views out of",
+                    ):
+                        workflow.configure_sales_workflow(client, apply=apply)
+
+                    self.assertEqual(_writes(client), [])
+
+    def test_a_duplicate_live_index_view_fails_closed_before_any_write(self) -> None:
+        for apply in self.MODES:
+            with self.subTest(apply=apply):
+                client = FakeClient()
+                duplicate = copy.deepcopy(client.index_view)
+                duplicate["id"] = self.OTHER_VIEW_ID
+                duplicate["name"] = "All Leads"
+                client.views.append(duplicate)
+
+                with self.assertRaisesRegex(
+                    workflow.ConfigurationError,
+                    f"2 live {workflow.INDEX_VIEW_KEY} views out of 2",
+                ):
+                    workflow.configure_sales_workflow(client, apply=apply)
+
+                self.assertEqual(_writes(client), [])
+
+    def test_a_deactivated_index_view_beside_a_live_one_is_ignored(self) -> None:
+        client = FakeClient()
+        stale = copy.deepcopy(client.index_view)
+        stale["id"] = self.OTHER_VIEW_ID
+        stale["isActive"] = False
+        client.views.append(stale)
+        client.view_fields[stale["id"]] = []
+
+        workflow.configure_sales_workflow(client, apply=True)
+
+        self.assertEqual(client.view_fields[stale["id"]], [])
+        self.assertFalse(
+            any(self.OTHER_VIEW_ID in call[1] for call in client.calls)
+        )
+        self.assertEqual(
+            len(client.view_fields[INDEX_VIEW_ID]), 2 + len(workflow.SALES_COLUMNS)
+        )
+
+    def test_an_index_view_belonging_to_another_object_fails_closed(self) -> None:
+        for apply in self.MODES:
+            with self.subTest(apply=apply):
+                client = FakeClient()
+                client.index_view["objectMetadataId"] = "10000000-0000-0000-0000-00ff"
+
+                with self.assertRaisesRegex(
+                    workflow.ConfigurationError, "belongs to object"
+                ):
+                    workflow.configure_sales_workflow(client, apply=apply)
+
+                self.assertEqual(_writes(client), [])
+
+    def test_an_index_view_without_an_id_fails_closed(self) -> None:
+        for apply in self.MODES:
+            with self.subTest(apply=apply):
+                client = FakeClient()
+                client.index_view.pop("id")
+
+                with self.assertRaisesRegex(
+                    workflow.ConfigurationError, "without an id"
+                ):
+                    workflow.configure_sales_workflow(client, apply=apply)
+
+                self.assertEqual(_writes(client), [])
+
+
+# Dashboard Priority Call Queue and Recontact Due are operator-created, so their
+# names are stored verbatim and stay the right way to find them.
+class NamedViewResolutionTests(unittest.TestCase):
+    MODES = (False, True)
+
+    OTHER_VIEW_ID = "20000000-0000-0000-0000-0000000000fe"
+
+    def test_a_missing_queue_view_fails_closed_before_any_write(self) -> None:
+        for apply in self.MODES:
+            with self.subTest(apply=apply):
+                client = FakeClient()
+                client.views.remove(client.view_named(workflow.QUEUE_VIEW_NAME))
+
+                with self.assertRaisesRegex(
+                    workflow.ConfigurationError,
+                    f'"{workflow.QUEUE_VIEW_NAME}" was not found',
+                ):
+                    workflow.configure_sales_workflow(client, apply=apply)
+
+                self.assertEqual(_writes(client), [])
+
+    def test_a_duplicate_managed_name_fails_closed_before_any_write(self) -> None:
+        for name in (workflow.QUEUE_VIEW_NAME, workflow.RECONTACT_VIEW_NAME):
+            for apply in self.MODES:
+                with self.subTest(name=name, apply=apply):
+                    client = FakeClient(include_recontact_view=True)
+                    duplicate = copy.deepcopy(client.view_named(name))
+                    duplicate["id"] = self.OTHER_VIEW_ID
+                    client.views.append(duplicate)
+
+                    with self.assertRaisesRegex(
+                        workflow.ConfigurationError,
+                        f'returned 2 views named "{name}"',
+                    ):
+                        workflow.configure_sales_workflow(client, apply=apply)
+
+                    self.assertEqual(_writes(client), [])
+
+    def test_one_view_cannot_take_two_managed_roles(self) -> None:
+        # The index view is found by key, so a name collision cannot silently
+        # hand it a second column set that overwrites the first.
+        for name, other_role in (
+            (workflow.QUEUE_VIEW_NAME, workflow.QUEUE_VIEW_NAME),
+            (workflow.RECONTACT_VIEW_NAME, workflow.RECONTACT_VIEW_NAME),
+        ):
+            for apply in self.MODES:
+                with self.subTest(name=name, apply=apply):
+                    client = FakeClient()
+                    if name == workflow.QUEUE_VIEW_NAME:
+                        # Leave the renamed index view as the only match.
+                        client.views.remove(
+                            client.view_named(workflow.QUEUE_VIEW_NAME)
+                        )
+                    client.index_view["name"] = name
+
+                    with self.assertRaises(workflow.ConfigurationError) as caught:
+                        workflow.configure_sales_workflow(client, apply=apply)
+
+                    message = str(caught.exception)
+                    self.assertIn("more than one managed role", message)
+                    self.assertIn(workflow.INDEX_VIEW_DESCRIPTION, message)
+                    self.assertIn(other_role, message)
+                    self.assertEqual(_writes(client), [])
 
 
 def _http_error(code: int) -> HTTPError:
