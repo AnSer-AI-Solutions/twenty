@@ -953,7 +953,16 @@ def _items(payload: Any) -> list[dict[str, Any]]:
 def _validate_existing_field(
     existing: dict[str, Any], definition: dict[str, Any]
 ) -> None:
-    for key in ("type", "label"):
+    # isNullable and defaultValue decide how the field behaves at runtime just
+    # as much as its type does, so a live field that has drifted on either is
+    # not the field this configurator would have created and must not be
+    # reported as converged.
+    for key in ("type", "label", "isNullable", "defaultValue"):
+        # A key the definition omits is unconstrained, except for defaultValue:
+        # the field is then created without one, so the live field is expected
+        # to carry null. An absent key and an explicit null read the same way.
+        if key not in definition and key != "defaultValue":
+            continue
         if existing.get(key) != definition.get(key):
             raise ConfigurationError(
                 f"Twenty field {definition['name']} has {key} "

@@ -287,6 +287,9 @@ class FakeClient:
     def view_named(self, name: str) -> dict[str, Any]:
         return next(view for view in self.views if view["name"] == name)
 
+    def field_by_name(self, name: str) -> dict[str, Any]:
+        return next(field for field in self.company["fields"] if field["name"] == name)
+
     def _add_managed_view_fields(self) -> None:
         fields = {field["name"]: field for field in self.company["fields"]}
         for view in self.views:
@@ -589,6 +592,160 @@ def _label_agnostic(changes: list[Any]) -> list[tuple[Any, ...]]:
             )
         )
     return normalized
+
+
+# A live field whose isNullable or defaultValue has drifted from SALES_FIELDS
+# behaves differently at runtime than the definition this configurator reports
+# as converged, so the drift has to stop the run before any write. Nothing here
+# repairs a drifted field: the fix is an operator decision, not this script's.
+class ExistingFieldDriftTests(unittest.TestCase):
+    MODES = (False, True)
+
+    # One case per shape the check has to cover: a nullable SELECT carrying a
+    # default, a non-nullable SELECT, a BOOLEAN whose default is False, and
+    # nullable fields declared without a default at all.
+    DRIFT_CASES = (
+        ("callStatus", "isNullable", False),
+        ("callStatus", "defaultValue", "'CONNECTED'"),
+        ("salesLifecycleStatus", "isNullable", True),
+        ("salesLifecycleStatus", "defaultValue", "'WORKING'"),
+        ("salesActioned", "isNullable", True),
+        ("salesActioned", "defaultValue", True),
+        ("byronReviewed", "defaultValue", True),
+        ("callAttempts", "isNullable", False),
+        ("salesDisposition", "isNullable", False),
+        ("recontactAt", "isNullable", False),
+    )
+
+    NO_DEFAULT_FIELD_NAMES = tuple(
+        definition["name"]
+        for definition in workflow.SALES_FIELDS
+        if "defaultValue" not in definition
+    )
+
+    def _pending_client(self) -> FakeClient:
+        # The sales fields exist, but the Recontact view and every managed
+        # column do not: this workspace has writes queued behind the check.
+        return FakeClient(include_sales_fields=True)
+
+    def _reconciled_client(self) -> FakeClient:
+        return FakeClient(
+            include_sales_fields=True,
+            include_recontact_view=True,
+            include_managed_view_fields=True,
+            include_recontact_filters=True,
+        )
+
+    def test_drift_fails_the_same_way_in_both_modes_before_any_write(self) -> None:
+        for name, key, drifted in self.DRIFT_CASES:
+            messages = []
+            for apply in self.MODES:
+                with self.subTest(field=name, key=key, apply=apply):
+                    client = self._pending_client()
+                    client.field_by_name(name)[key] = drifted
+
+                    with self.assertRaises(workflow.ConfigurationError) as caught:
+                        workflow.configure_sales_workflow(client, apply=apply)
+
+                    self.assertIn(
+                        f"Twenty field {name} has {key} {drifted!r}, expected ",
+                        str(caught.exception),
+                    )
+                    self.assertEqual(_writes(client), [])
+                    messages.append(str(caught.exception))
+
+            self.assertEqual(messages[0], messages[1], msg=f"{name}.{key}")
+
+    def test_drift_fails_on_an_otherwise_reconciled_workspace(self) -> None:
+        # The workspace this bug is about: everything else already converges, so
+        # without the check the run reports zero changes over a drifted field.
+        for name, key, drifted in self.DRIFT_CASES:
+            for apply in self.MODES:
+                with self.subTest(field=name, key=key, apply=apply):
+                    client = self._reconciled_client()
+                    client.field_by_name(name)[key] = drifted
+
+                    with self.assertRaisesRegex(
+                        workflow.ConfigurationError, f"Twenty field {name} has {key} "
+                    ):
+                        workflow.configure_sales_workflow(client, apply=apply)
+
+                    self.assertEqual(_writes(client), [])
+
+    def test_a_field_declared_without_a_default_must_not_carry_one(self) -> None:
+        self.assertIn("salesDisposition", self.NO_DEFAULT_FIELD_NAMES)
+        for name in self.NO_DEFAULT_FIELD_NAMES:
+            for apply in self.MODES:
+                with self.subTest(field=name, apply=apply):
+                    client = self._pending_client()
+                    client.field_by_name(name)["defaultValue"] = "'DRIFTED'"
+
+                    with self.assertRaisesRegex(
+                        workflow.ConfigurationError,
+                        f"Twenty field {name} has defaultValue",
+                    ):
+                        workflow.configure_sales_workflow(client, apply=apply)
+
+                    self.assertEqual(_writes(client), [])
+
+    def test_a_null_default_reads_the_same_as_an_absent_one(self) -> None:
+        for apply in self.MODES:
+            with self.subTest(apply=apply):
+                client = self._reconciled_client()
+                for name in self.NO_DEFAULT_FIELD_NAMES:
+                    client.field_by_name(name)["defaultValue"] = None
+
+                self.assertEqual(
+                    workflow.configure_sales_workflow(client, apply=apply), []
+                )
+                self.assertEqual(_writes(client), [])
+
+    def test_a_dropped_default_is_drift_rather_than_a_match(self) -> None:
+        # A BOOLEAN default of False is not the same as no default: reading an
+        # absent key as falsey would let a field that lost its default pass.
+        for apply in self.MODES:
+            with self.subTest(apply=apply):
+                client = self._pending_client()
+                del client.field_by_name("salesActioned")["defaultValue"]
+
+                with self.assertRaisesRegex(
+                    workflow.ConfigurationError,
+                    "Twenty field salesActioned has defaultValue None, "
+                    "expected False",
+                ):
+                    workflow.configure_sales_workflow(client, apply=apply)
+
+                self.assertEqual(_writes(client), [])
+
+    def test_matching_fields_are_accepted_unchanged_in_both_modes(self) -> None:
+        for apply in self.MODES:
+            with self.subTest(apply=apply):
+                client = self._reconciled_client()
+
+                self.assertEqual(
+                    workflow.configure_sales_workflow(client, apply=apply), []
+                )
+                self.assertEqual(_writes(client), [])
+
+    def test_a_matching_field_does_not_block_the_creation_of_a_missing_one(
+        self,
+    ) -> None:
+        client = self._pending_client()
+        _drop_field(client, "recontactAt")
+
+        changes = workflow.configure_sales_workflow(client, apply=True)
+
+        self.assertEqual(
+            [
+                change.name
+                for change in changes
+                if change.resource == "field" and change.action == "create"
+            ],
+            ["recontactAt"],
+        )
+        created = client.field_by_name("recontactAt")
+        self.assertEqual(created["isNullable"], True)
+        self.assertNotIn("defaultValue", created)
 
 
 class ScriptedObjectClient:
