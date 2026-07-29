@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import io
+import json
 import pathlib
 import sys
 import unittest
 from typing import Any
+from unittest import mock
+from urllib.error import HTTPError, URLError
 
 MODULE_PATH = pathlib.Path(__file__).parents[1] / "configure_sales_workflow.py"
 SPEC = importlib.util.spec_from_file_location("configure_sales_workflow", MODULE_PATH)
@@ -460,6 +464,147 @@ class ConfigureSalesWorkflowTests(unittest.TestCase):
             workflow.configure_sales_workflow(client, apply=True)
 
         self.assertFalse(any(method != "GET" for method, _, _ in client.calls))
+
+
+def _http_error(code: int) -> HTTPError:
+    return HTTPError(
+        "https://twenty.example/rest/metadata/fields",
+        code,
+        "error",
+        None,
+        io.BytesIO(b"upstream detail"),
+    )
+
+
+class _FakeResponse:
+    status = 200
+
+    def __init__(self, payload: Any) -> None:
+        self._body = io.BytesIO(json.dumps(payload).encode())
+
+    def __enter__(self) -> _FakeResponse:
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        return None
+
+    def read(self, *args: Any) -> bytes:
+        return self._body.read(*args)
+
+
+# These exercise the real TwentyMetadataClient against a mocked urlopen so the
+# retry policy itself is under test, not the FakeClient stand-in.
+class ClientPolicyTests(unittest.TestCase):
+    WRITE_METHODS = ("POST", "PATCH")
+
+    def _client(self) -> Any:
+        return workflow.TwentyMetadataClient("https://twenty.example", "key", 1)
+
+    def _failures(self) -> tuple[tuple[str, BaseException], ...]:
+        failures = (
+            ("transport", URLError("boom")),
+            ("timeout", TimeoutError("slow")),
+            ("rate limit", _http_error(429)),
+            ("server error", _http_error(503)),
+        )
+        for _, failure in failures:
+            if isinstance(failure, HTTPError):
+                self.addCleanup(failure.close)
+        return failures
+
+    def test_get_is_retried_on_every_transient_failure(self) -> None:
+        for label, failure in self._failures():
+            with self.subTest(failure=label):
+                client = self._client()
+                with (
+                    mock.patch.object(
+                        workflow, "urlopen", side_effect=failure
+                    ) as opener,
+                    mock.patch.object(workflow.time, "sleep") as sleeper,
+                ):
+                    with self.assertRaises(workflow.ConfigurationError):
+                        client.request("GET", "/rest/metadata/objects?limit=100")
+
+                self.assertEqual(opener.call_count, workflow.MAX_ATTEMPTS)
+                self.assertEqual(sleeper.call_count, workflow.MAX_ATTEMPTS - 1)
+
+    def test_a_successful_get_is_issued_once(self) -> None:
+        client = self._client()
+        with mock.patch.object(
+            workflow, "urlopen", return_value=_FakeResponse({"data": []})
+        ) as opener:
+            self.assertEqual(
+                client.request("GET", "/rest/metadata/views?viewId=1"),
+                {"data": []},
+            )
+
+        self.assertEqual(opener.call_count, 1)
+
+    def test_writes_are_never_retried_on_any_transient_failure(self) -> None:
+        for method in self.WRITE_METHODS:
+            for label, failure in self._failures():
+                with self.subTest(method=method, failure=label):
+                    client = self._client()
+                    with (
+                        mock.patch.object(
+                            workflow, "urlopen", side_effect=failure
+                        ) as opener,
+                        mock.patch.object(workflow.time, "sleep") as sleeper,
+                    ):
+                        with self.assertRaises(workflow.ConfigurationError):
+                            client.request(method, "/rest/metadata/fields", {})
+
+                    self.assertEqual(opener.call_count, 1)
+                    self.assertEqual(sleeper.call_count, 0)
+
+    def test_an_ambiguous_write_reports_an_unknown_outcome(self) -> None:
+        for method in self.WRITE_METHODS:
+            for label, failure in self._failures():
+                with self.subTest(method=method, failure=label):
+                    client = self._client()
+                    with (
+                        mock.patch.object(workflow, "urlopen", side_effect=failure),
+                        mock.patch.object(workflow.time, "sleep"),
+                    ):
+                        with self.assertRaisesRegex(
+                            workflow.ConfigurationError,
+                            f"outcome of {method} /rest/metadata/views "
+                            "may be unknown; run a dry run before retrying",
+                        ):
+                            client.request(method, "/rest/metadata/views", {})
+
+    def test_a_failed_get_does_not_claim_an_unknown_outcome(self) -> None:
+        client = self._client()
+        with (
+            mock.patch.object(workflow, "urlopen", side_effect=URLError("boom")),
+            mock.patch.object(workflow.time, "sleep"),
+        ):
+            with self.assertRaises(workflow.ConfigurationError) as caught:
+                client.request("GET", "/rest/metadata/objects?limit=100")
+
+        self.assertNotIn("may be unknown", str(caught.exception))
+
+    def test_unsupported_verbs_are_rejected_before_any_request(self) -> None:
+        for method in ("DELETE", "PUT", "HEAD", "delete"):
+            with self.subTest(method=method):
+                client = self._client()
+                with mock.patch.object(workflow, "urlopen") as opener:
+                    with self.assertRaisesRegex(
+                        workflow.ConfigurationError, "not permitted"
+                    ):
+                        client.request(method, "/rest/metadata/fields/some-id")
+
+                self.assertEqual(opener.call_count, 0)
+
+    def test_the_configurator_only_uses_permitted_methods(self) -> None:
+        client = FakeClient()
+
+        workflow.configure_sales_workflow(client, apply=True)
+
+        self.assertTrue(client.calls)
+        self.assertTrue(
+            all(method in workflow.ALLOWED_METHODS for method, _, _ in client.calls)
+        )
 
 
 if __name__ == "__main__":
