@@ -82,6 +82,15 @@ error in a dry run and in an apply, having written nothing. Add the missing
 field upstream, where it is owned; the configurator will not create it, because
 a definition invented here would drift from the owner's.
 
+The Company object itself is resolved from a paginated listing. Reading only
+the first page let a workspace with enough objects report Company missing when
+it was merely further down, so the configurator follows `pageInfo` cursors, in
+both the direct and legacy response shapes. Company on the first page stays a
+single request. Later pages are fetched only while Company is still missing,
+and the walk refuses to continue past a page that claims a successor without
+naming a usable, unseen cursor, past a repeated page, or past
+`MAX_OBJECT_PAGES`. Each of those raises before the first write.
+
 Lead records are retained regardless of lifecycle state. Use `NURTURE` for a
 lead that should return later; the CT332 daily CRM sync fills a blank
 `Recontact At` with the date exactly six calendar months from that run.
