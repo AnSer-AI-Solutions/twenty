@@ -53,6 +53,11 @@ verb the wrapper accepts.
 `All Companies`, `Dashboard Priority Call Queue`, and `Recontact Due` views
 reproducible through Twenty's supported metadata API.
 
+It resolves those views by name, and `All Companies` is the name Twenty renders
+for the generated Company index view. Applying the Lead labels changes that
+rendered name, so run this configurator first; see
+[Lead labels](#lead-labels).
+
 It owns these Company fields:
 
 - `callStatus`, `callAttempts`, `lastCalledAt`, `nextFollowUpAt`, and
@@ -229,9 +234,111 @@ ssh ops@192.168.31.164 \
   < deployments/ct333-twenty/configure_crm_objects.py
 ```
 
+## Lead labels
+
+`configure_lead_labels.py` is a third standalone configurator. Its only mutation
+is `PATCH /rest/metadata/objects/{companyId}` carrying `labelSingular` `Lead`
+and `labelPlural` `Leads`.
+
+### Why relabelling Company creates the switch
+
+The sales desk works from three entries: Leads, Customers, and Callers.
+`configure_crm_objects.py` already creates the last two. The first is Company,
+which has held the lead pipeline since CT332 began syncing into it but still
+reads `Companies` everywhere in the UI.
+
+Twenty builds navigation entries, page titles, and generated view names from an
+object's labels, so changing those two labels is the whole change. The sidebar
+reads `Leads` beside `Customers` and `Callers`, and promoting a lead to a
+customer stays a manual decision someone makes in the UI. There is no second
+object, no record migration, and no relation between Company and Customer;
+customer-to-lead provenance is still deliberately out of scope, as it is for
+`configure_crm_objects.py`.
+
+### Why the enrichment contract survives
+
+Twenty derives its API surface from an object's *internal* names, never from its
+labels. `nameSingular` stays `company` and `namePlural` stays `companies`, so
+the CT332 daily CRM sync keeps posting to `/rest/companies` and keeps reading and
+writing the same Company field names. `configure_sales_workflow.py` keeps owning
+the same fields under the same names.
+
+Nothing else moves. In v2.20 a label-only update has no migration side effects:
+`handleFlatObjectMetadataUpdateSideEffect` recomputes indexes, view fields, and
+related morph field names only when a *name* or the label identifier changes.
+Every Company field, saved view, view column, saved filter, and record is left
+exactly as it was.
+
+### The generated `All Companies` view name does change
+
+The Company index view is stored as the literal template
+`All {objectLabelPlural}`, and `GET /rest/metadata/views` renders it against the
+effective object label on every read. Once the labels are applied that view
+comes back named `All Leads`.
+
+`configure_sales_workflow.py` resolves that view by name, so run it *before*
+applying the labels. Afterwards it raises
+`Twenty view "All Companies" was not found` and stops before touching any view,
+which makes the wrong order safe but unproductive. `Dashboard Priority Call
+Queue` and `Recontact Due` are literal names and are unaffected. This is the
+same hazard that makes `configure_crm_objects.py` match its index views on
+`key == "INDEX"` instead of by name.
+
+### Safety properties
+
+Each is covered by a test in `tests/test_configure_lead_labels.py`:
+
+- Dry run by default; `--apply` is required to write, and a relabelled
+  workspace reports `"changeCount": 0`.
+- The single `PATCH` body carries exactly `labelSingular` and `labelPlural`. The
+  HTTP client rejects `POST` and `DELETE` outright, so nothing is created or
+  removed, and no field, view, or record endpoint is ever addressed.
+- Company is resolved from `GET /rest/metadata/objects` on either internal name,
+  following `pageInfo` cursors, in both response formats. A missing, duplicated,
+  or renamed Company, or one without an id, raises before the write.
+- An object with `isLabelSyncedWithName` set raises. Its names are meant to
+  track its labels, and `Lead`/`Leads` do not derive `company`/`companies`.
+- `PATCH` is never retried, because a write that may already have landed cannot
+  be replayed safely. Only `GET` is.
+- After the write the object is read back. The labels must read `Lead`/`Leads`
+  and the internal names must still read `company`/`companies`, or the run
+  reports an error.
+
+Company is a standard object, and v2.20 records a label change on a standard
+object in the object's `overrides` blob rather than on the `labelSingular` and
+`labelPlural` columns; reads spread that blob back over the row. The
+configurator compares override-then-column, which is what the UI shows, so it
+settles to `"changeCount": 0` whichever way the workspace stores the label.
+`FLAT_OBJECT_METADATA_EDITABLE_PROPERTIES.standard` excludes `nameSingular`,
+`namePlural`, and `isLabelSyncedWithName`, so v2.20 rejects those keys on
+Company outright and the payload carries only the two labels. The API key needs
+the `DATA_MODEL` settings permission, as it does for the other two
+configurators.
+
+### Running it
+
+Stream it into the CT332 CRM sync container the same way, dry run first:
+
+```bash
+ssh ops@192.168.31.164 \
+  'sudo docker exec -i leads-crm-sync-1 python -' \
+  < deployments/ct333-twenty/configure_lead_labels.py
+```
+
+Review the reported change, then apply:
+
+```bash
+ssh ops@192.168.31.164 \
+  'sudo docker exec -i leads-crm-sync-1 python - --apply' \
+  < deployments/ct333-twenty/configure_lead_labels.py
+```
+
+Repeat the dry run after apply. A relabelled workspace reports
+`"changeCount": 0`.
+
 ## Tests
 
-Run the focused tests for both configurators and the wrapper with:
+Run the focused tests for all three configurators and the wrapper with:
 
 ```bash
 python3 -m unittest discover \
