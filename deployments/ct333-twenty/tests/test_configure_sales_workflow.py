@@ -25,6 +25,7 @@ INDEX_VIEW_ID = "20000000-0000-0000-0000-000000000001"
 QUEUE_VIEW_ID = "20000000-0000-0000-0000-000000000002"
 RECONTACT_VIEW_ID = "20000000-0000-0000-0000-000000000003"
 RANKED_VIEW_ID = "20000000-0000-0000-0000-000000000004"
+ACTIVITY_VIEW_ID = "20000000-0000-0000-0000-000000000005"
 
 # What Twenty renders for the Company index view today. It is a rendered string,
 # never matched on, so every test that cares states the name it is standing in
@@ -43,6 +44,7 @@ class FakeClient:
         include_sales_fields: bool = False,
         include_recontact_view: bool = False,
         include_ranked_view: bool = True,
+        include_activity_view: bool = False,
         include_managed_view_fields: bool = False,
         include_recontact_filters: bool = False,
         filler_object_count: int = 0,
@@ -123,6 +125,16 @@ class FakeClient:
                     "objectMetadataId": COMPANY_ID,
                 }
             )
+        if include_activity_view:
+            self.views.append(
+                {
+                    "id": ACTIVITY_VIEW_ID,
+                    "name": workflow.ACTIVITY_HISTORY_VIEW_NAME,
+                    "key": None,
+                    "isActive": True,
+                    "objectMetadataId": COMPANY_ID,
+                }
+            )
         self.view_fields = {
             view["id"]: [
                 {
@@ -144,6 +156,8 @@ class FakeClient:
         }
         if include_ranked_view:
             self.view_fields[RANKED_VIEW_ID] = []
+        if include_activity_view:
+            self.view_fields[ACTIVITY_VIEW_ID] = []
         self.view_filters: dict[str, list[dict[str, Any]]] = {
             view["id"]: [] for view in self.views
         }
@@ -199,11 +213,11 @@ class FakeClient:
         if method == "POST" and path == "/rest/metadata/views":
             assert payload is not None
             view = copy.deepcopy(payload)
-            view["id"] = (
-                RECONTACT_VIEW_ID
-                if payload["name"] == workflow.RECONTACT_VIEW_NAME
-                else RANKED_VIEW_ID
-            )
+            view["id"] = {
+                workflow.RECONTACT_VIEW_NAME: RECONTACT_VIEW_ID,
+                workflow.RANKED_VIEW_NAME: RANKED_VIEW_ID,
+                workflow.ACTIVITY_HISTORY_VIEW_NAME: ACTIVITY_VIEW_ID,
+            }[payload["name"]]
             self.views.append(view)
             self.view_fields[view["id"]] = []
             self.view_filters[view["id"]] = []
@@ -345,6 +359,10 @@ class FakeClient:
                 columns = workflow.RANKED_COLUMNS
                 first_position = 0
                 self.view_fields[view["id"]] = []
+            elif view["name"] == workflow.ACTIVITY_HISTORY_VIEW_NAME:
+                columns = workflow.ACTIVITY_HISTORY_COLUMNS
+                first_position = 0
+                self.view_fields[view["id"]] = []
             else:
                 columns = workflow.SALES_COLUMNS
                 first_position = 7
@@ -399,6 +417,36 @@ class FakeClient:
                     "direction": definition["direction"],
                 }
             )
+        activity_view = next(
+            (
+                item
+                for item in self.views
+                if item["name"] == workflow.ACTIVITY_HISTORY_VIEW_NAME
+            ),
+            None,
+        )
+        if activity_view is not None:
+            for definition in workflow.ACTIVITY_HISTORY_FILTERS:
+                field = fields[definition["field"]]
+                self.view_filters[activity_view["id"]].append(
+                    {
+                        "id": f"view-filter-{activity_view['id']}-{field['id']}",
+                        "viewId": activity_view["id"],
+                        "fieldMetadataId": field["id"],
+                        "operand": definition["operand"],
+                        "value": copy.deepcopy(definition["value"]),
+                    }
+                )
+            for definition in workflow.ACTIVITY_HISTORY_SORTS:
+                field = fields[definition["field"]]
+                self.view_sorts[activity_view["id"]].append(
+                    {
+                        "id": f"view-sort-{activity_view['id']}-{field['id']}",
+                        "viewId": activity_view["id"],
+                        "fieldMetadataId": field["id"],
+                        "direction": definition["direction"],
+                    }
+                )
 
 
 class ConfigureSalesWorkflowTests(unittest.TestCase):
@@ -429,20 +477,31 @@ class ConfigureSalesWorkflowTests(unittest.TestCase):
             + [
                 (workflow.RANKED_VIEW_NAME, column["name"])
                 for column in workflow.RANKED_COLUMNS
+            ]
+            + [
+                (workflow.ACTIVITY_HISTORY_VIEW_NAME, column["name"])
+                for column in workflow.ACTIVITY_HISTORY_COLUMNS
             ],
         )
         self.assertEqual(
             [change.name for change in changes if change.resource == "view"],
-            [workflow.RECONTACT_VIEW_NAME],
+            [workflow.RECONTACT_VIEW_NAME, workflow.ACTIVITY_HISTORY_VIEW_NAME],
         )
         self.assertEqual(
             [change.name for change in changes if change.resource == "viewFilter"],
             [definition["field"] for definition in workflow.RECONTACT_FILTERS]
-            + [definition["field"] for definition in workflow.RANKED_FILTERS],
+            + [definition["field"] for definition in workflow.RANKED_FILTERS]
+            + [
+                definition["field"]
+                for definition in workflow.ACTIVITY_HISTORY_FILTERS
+            ],
         )
         self.assertEqual(
             [change.name for change in changes if change.resource == "viewSort"],
-            [definition["field"] for definition in workflow.RANKED_SORTS],
+            [definition["field"] for definition in workflow.RANKED_SORTS]
+            + [
+                definition["field"] for definition in workflow.ACTIVITY_HISTORY_SORTS
+            ],
         )
         self.assertFalse(any(method != "GET" for method, _, _ in client.calls))
 
@@ -463,15 +522,18 @@ class ConfigureSalesWorkflowTests(unittest.TestCase):
             len(view_field_creates),
             SALES_VIEW_COUNT * len(workflow.SALES_COLUMNS)
             + len(workflow.RECONTACT_COLUMNS)
-            + len(workflow.RANKED_COLUMNS),
+            + len(workflow.RANKED_COLUMNS)
+            + len(workflow.ACTIVITY_HISTORY_COLUMNS),
         )
         self.assertEqual(
             len([call for call in writes if call[1] == "/rest/metadata/viewFilters"]),
-            len(workflow.RECONTACT_FILTERS) + len(workflow.RANKED_FILTERS),
+            len(workflow.RECONTACT_FILTERS)
+            + len(workflow.RANKED_FILTERS)
+            + len(workflow.ACTIVITY_HISTORY_FILTERS),
         )
         self.assertEqual(
             len([call for call in writes if call[1] == "/rest/metadata/viewSorts"]),
-            len(workflow.RANKED_SORTS),
+            len(workflow.RANKED_SORTS) + len(workflow.ACTIVITY_HISTORY_SORTS),
         )
         existing_view_ids = {INDEX_VIEW_ID, QUEUE_VIEW_ID}
         for view_id, items in client.view_fields.items():
@@ -481,10 +543,63 @@ class ConfigureSalesWorkflowTests(unittest.TestCase):
             self.assertEqual(items[1]["position"], 6)
         self.assertTrue(changes)
 
+    def test_missing_activity_view_is_created_with_contact_history_rules(self) -> None:
+        client = FakeClient(
+            include_sales_fields=True,
+            include_recontact_view=True,
+            include_managed_view_fields=True,
+            include_recontact_filters=True,
+        )
+
+        workflow.configure_sales_workflow(client, apply=True)
+
+        activity_view = client.view_named(workflow.ACTIVITY_HISTORY_VIEW_NAME)
+        fields_by_id = {
+            field["id"]: field["name"] for field in client.company["fields"]
+        }
+        self.assertEqual(
+            [
+                fields_by_id[item["fieldMetadataId"]]
+                for item in sorted(
+                    client.view_fields[activity_view["id"]],
+                    key=lambda item: item["position"],
+                )
+            ],
+            [column["name"] for column in workflow.ACTIVITY_HISTORY_COLUMNS],
+        )
+        self.assertEqual(
+            [
+                (
+                    fields_by_id[item["fieldMetadataId"]],
+                    item["operand"],
+                    item["value"],
+                )
+                for item in client.view_filters[activity_view["id"]]
+            ],
+            [
+                (definition["field"], definition["operand"], definition["value"])
+                for definition in workflow.ACTIVITY_HISTORY_FILTERS
+            ],
+        )
+        self.assertEqual(
+            [
+                (
+                    fields_by_id[item["fieldMetadataId"]],
+                    item["direction"],
+                )
+                for item in client.view_sorts[activity_view["id"]]
+            ],
+            [
+                (definition["field"], definition["direction"])
+                for definition in workflow.ACTIVITY_HISTORY_SORTS
+            ],
+        )
+
     def test_repeated_apply_is_idempotent(self) -> None:
         client = FakeClient(
             include_sales_fields=True,
             include_recontact_view=True,
+            include_activity_view=True,
             include_managed_view_fields=True,
             include_recontact_filters=True,
         )
@@ -543,6 +658,7 @@ class ConfigureSalesWorkflowTests(unittest.TestCase):
         client = FakeClient(
             include_sales_fields=True,
             include_recontact_view=True,
+            include_activity_view=True,
             include_managed_view_fields=True,
             include_recontact_filters=True,
         )
@@ -597,6 +713,7 @@ class ConfigureSalesWorkflowTests(unittest.TestCase):
         client = FakeClient(
             include_sales_fields=True,
             include_recontact_view=True,
+            include_activity_view=True,
             include_managed_view_fields=True,
             include_recontact_filters=True,
         )
@@ -625,6 +742,7 @@ class ConfigureSalesWorkflowTests(unittest.TestCase):
         client = FakeClient(
             include_sales_fields=True,
             include_recontact_view=True,
+            include_activity_view=True,
             include_managed_view_fields=True,
             include_recontact_filters=True,
         )
@@ -647,6 +765,7 @@ class ConfigureSalesWorkflowTests(unittest.TestCase):
             include_sales_fields=True,
             include_recontact_view=True,
             include_ranked_view=False,
+            include_activity_view=True,
         )
 
         workflow.configure_sales_workflow(client, apply=True)
@@ -711,6 +830,7 @@ class ConfigureSalesWorkflowTests(unittest.TestCase):
         client = FakeClient(
             include_sales_fields=True,
             include_recontact_view=True,
+            include_activity_view=True,
             include_managed_view_fields=True,
             include_recontact_filters=True,
         )
@@ -730,6 +850,7 @@ class ConfigureSalesWorkflowTests(unittest.TestCase):
         client = FakeClient(
             include_sales_fields=True,
             include_recontact_view=True,
+            include_activity_view=True,
             include_managed_view_fields=True,
             include_recontact_filters=True,
         )
@@ -848,6 +969,7 @@ class ExistingFieldDriftTests(unittest.TestCase):
         return FakeClient(
             include_sales_fields=True,
             include_recontact_view=True,
+            include_activity_view=True,
             include_managed_view_fields=True,
             include_recontact_filters=True,
         )
@@ -1205,6 +1327,7 @@ class PreflightDependencyTests(unittest.TestCase):
                 *workflow.SALES_COLUMNS,
                 *workflow.RECONTACT_COLUMNS,
                 *workflow.RANKED_COLUMNS,
+                *workflow.ACTIVITY_HISTORY_COLUMNS,
             )
         } | {
             definition["field"]
@@ -1212,6 +1335,8 @@ class PreflightDependencyTests(unittest.TestCase):
                 *workflow.RECONTACT_FILTERS,
                 *workflow.RANKED_FILTERS,
                 *workflow.RANKED_SORTS,
+                *workflow.ACTIVITY_HISTORY_FILTERS,
+                *workflow.ACTIVITY_HISTORY_SORTS,
             )
         }
         self.assertEqual(
@@ -1246,6 +1371,7 @@ class PreflightDependencyTests(unittest.TestCase):
                         FakeClient(
                             include_sales_fields=True,
                             include_recontact_view=True,
+                            include_activity_view=True,
                             include_managed_view_fields=True,
                             include_recontact_filters=True,
                         ),
@@ -1314,6 +1440,7 @@ class PreflightDependencyTests(unittest.TestCase):
         reconciled_client = FakeClient(
             include_sales_fields=True,
             include_recontact_view=True,
+            include_activity_view=True,
             include_managed_view_fields=True,
             include_recontact_filters=True,
         )

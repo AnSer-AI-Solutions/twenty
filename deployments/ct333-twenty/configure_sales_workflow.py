@@ -27,7 +27,13 @@ INDEX_VIEW_DESCRIPTION = f"Company {INDEX_VIEW_KEY} view"
 QUEUE_VIEW_NAME = "Dashboard Priority Call Queue"
 RECONTACT_VIEW_NAME = "Recontact Due"
 RANKED_VIEW_NAME = "Ranked Lead Review Queue"
-NAMED_VIEW_NAMES = (QUEUE_VIEW_NAME, RECONTACT_VIEW_NAME, RANKED_VIEW_NAME)
+ACTIVITY_HISTORY_VIEW_NAME = "Sales Activity"
+NAMED_VIEW_NAMES = (
+    QUEUE_VIEW_NAME,
+    RECONTACT_VIEW_NAME,
+    RANKED_VIEW_NAME,
+    ACTIVITY_HISTORY_VIEW_NAME,
+)
 MANAGED_VIEWS = (INDEX_VIEW_DESCRIPTION, *NAMED_VIEW_NAMES)
 
 SALES_FIELDS: tuple[dict[str, Any], ...] = (
@@ -438,6 +444,34 @@ RANKED_SORTS: tuple[dict[str, Any], ...] = (
     },
 )
 
+# Call Notes is rich text and cannot be filtered in Twenty's table views. The
+# canonical contact timestamp is the safe proxy for a contacted-lead history.
+ACTIVITY_HISTORY_COLUMNS: tuple[dict[str, Any], ...] = (
+    {"name": "name", "size": 240},
+    {"name": "callStatus", "size": 150},
+    {"name": "lastCalledAt", "size": 170},
+    {"name": "callNotes", "size": 320},
+    {"name": "callAttempts", "size": 120},
+    {"name": "nextFollowUpAt", "size": 190},
+    {"name": "salesLifecycleStatus", "size": 170},
+    {"name": "salesDisposition", "size": 170},
+)
+
+ACTIVITY_HISTORY_FILTERS: tuple[dict[str, Any], ...] = (
+    {
+        "field": "lastCalledAt",
+        "operand": "IS_NOT_EMPTY",
+        "value": {},
+    },
+)
+
+ACTIVITY_HISTORY_SORTS: tuple[dict[str, Any], ...] = (
+    {
+        "field": "lastCalledAt",
+        "direction": "DESC",
+    },
+)
+
 # Every Company field this configurator creates itself.
 OWNED_FIELD_NAMES: frozenset[str] = frozenset(
     definition["name"] for definition in SALES_FIELDS
@@ -446,10 +480,21 @@ OWNED_FIELD_NAMES: frozenset[str] = frozenset(
 
 def _dependency_field_names() -> tuple[str, ...]:
     names: list[str] = []
-    for column in (*SALES_COLUMNS, *RECONTACT_COLUMNS, *RANKED_COLUMNS):
+    for column in (
+        *SALES_COLUMNS,
+        *RECONTACT_COLUMNS,
+        *RANKED_COLUMNS,
+        *ACTIVITY_HISTORY_COLUMNS,
+    ):
         if column["name"] not in OWNED_FIELD_NAMES and column["name"] not in names:
             names.append(column["name"])
-    for definition in (*RECONTACT_FILTERS, *RANKED_FILTERS, *RANKED_SORTS):
+    for definition in (
+        *RECONTACT_FILTERS,
+        *RANKED_FILTERS,
+        *RANKED_SORTS,
+        *ACTIVITY_HISTORY_FILTERS,
+        *ACTIVITY_HISTORY_SORTS,
+    ):
         field = definition["field"]
         if field not in OWNED_FIELD_NAMES and field not in names:
             names.append(field)
@@ -584,9 +629,13 @@ def configure_sales_workflow(
             "/rest/metadata/views?" + urlencode({"objectMetadataId": company["id"]}),
         )
     )
-    index_view, queue_view, recontact_view, ranked_view = _resolve_managed_views(
-        views, company["id"]
-    )
+    (
+        index_view,
+        queue_view,
+        recontact_view,
+        ranked_view,
+        activity_view,
+    ) = _resolve_managed_views(views, company["id"])
 
     for definition in SALES_FIELDS:
         existing = fields_by_name.get(definition["name"])
@@ -709,6 +758,7 @@ def configure_sales_workflow(
                 )
             )
 
+    ranked_was_missing = ranked_view is None
     if ranked_view is None:
         changes.append(
             Change(
@@ -806,6 +856,105 @@ def configure_sales_workflow(
                 )
             )
 
+    if activity_view is None:
+        changes.append(
+            Change(
+                action="create",
+                resource="view",
+                name=ACTIVITY_HISTORY_VIEW_NAME,
+                details={"type": "TABLE", "visibility": "WORKSPACE"},
+            )
+        )
+        if apply:
+            activity_view = client.request(
+                "POST",
+                "/rest/metadata/views",
+                {
+                    "name": ACTIVITY_HISTORY_VIEW_NAME,
+                    "objectMetadataId": company["id"],
+                    "icon": "IconHistory",
+                    "type": "TABLE",
+                    "position": len(views)
+                    + (1 if recontact_was_missing else 0)
+                    + (1 if ranked_was_missing else 0),
+                    "isCompact": False,
+                    "openRecordIn": "SIDE_PANEL",
+                    "visibility": "WORKSPACE",
+                },
+                expected=(201,),
+            )
+
+    if activity_view is not None:
+        changes.extend(
+            _configure_view_columns(
+                client,
+                view=activity_view,
+                view_details={"view": ACTIVITY_HISTORY_VIEW_NAME},
+                fields_by_name=fields_by_name,
+                columns=ACTIVITY_HISTORY_COLUMNS,
+                apply=apply,
+            )
+        )
+        changes.extend(
+            _configure_view_filters(
+                client,
+                view=activity_view,
+                view_details={"view": ACTIVITY_HISTORY_VIEW_NAME},
+                fields_by_name=fields_by_name,
+                definitions=ACTIVITY_HISTORY_FILTERS,
+                apply=apply,
+            )
+        )
+        changes.extend(
+            _configure_view_sorts(
+                client,
+                view=activity_view,
+                view_details={"view": ACTIVITY_HISTORY_VIEW_NAME},
+                fields_by_name=fields_by_name,
+                definitions=ACTIVITY_HISTORY_SORTS,
+                apply=apply,
+            )
+        )
+    else:
+        for column in ACTIVITY_HISTORY_COLUMNS:
+            changes.append(
+                Change(
+                    action="create",
+                    resource="viewField",
+                    name=column["name"],
+                    details={
+                        "view": ACTIVITY_HISTORY_VIEW_NAME,
+                        "isVisible": True,
+                        "size": column["size"],
+                    },
+                )
+            )
+        for definition in ACTIVITY_HISTORY_FILTERS:
+            changes.append(
+                Change(
+                    action="create",
+                    resource="viewFilter",
+                    name=definition["field"],
+                    details={
+                        "view": ACTIVITY_HISTORY_VIEW_NAME,
+                        "operand": definition["operand"],
+                        "value": definition["value"],
+                    },
+                )
+            )
+        for definition in ACTIVITY_HISTORY_SORTS:
+            changes.append(
+                Change(
+                    action="create",
+                    resource="viewSort",
+                    name=definition["field"],
+                    details={
+                        "view": ACTIVITY_HISTORY_VIEW_NAME,
+                        "direction": definition["direction"],
+                    },
+                )
+            )
+
     return changes
 
 
@@ -816,20 +965,25 @@ def _resolve_managed_views(
     dict[str, Any],
     dict[str, Any] | None,
     dict[str, Any] | None,
+    dict[str, Any] | None,
 ]:
     index_view = _resolve_index_view(views, company_id)
     queue_view = _resolve_named_view(views, QUEUE_VIEW_NAME, required=True)
     recontact_view = _resolve_named_view(views, RECONTACT_VIEW_NAME, required=False)
     ranked_view = _resolve_named_view(views, RANKED_VIEW_NAME, required=False)
+    activity_view = _resolve_named_view(
+        views, ACTIVITY_HISTORY_VIEW_NAME, required=False
+    )
     _reject_role_collisions(
         (
             (INDEX_VIEW_DESCRIPTION, index_view),
             (QUEUE_VIEW_NAME, queue_view),
             (RECONTACT_VIEW_NAME, recontact_view),
             (RANKED_VIEW_NAME, ranked_view),
+            (ACTIVITY_HISTORY_VIEW_NAME, activity_view),
         )
     )
-    return index_view, queue_view, recontact_view, ranked_view
+    return index_view, queue_view, recontact_view, ranked_view, activity_view
 
 
 def _resolve_index_view(
@@ -882,7 +1036,7 @@ def _resolve_named_view(
         return matches[0]
     if required:
         raise ConfigurationError(f'Twenty view "{name}" was not found')
-    # Absent is a normal state for Recontact Due; the caller creates it.
+    # Absent is a normal state for optional managed views; the caller creates it.
     return None
 
 

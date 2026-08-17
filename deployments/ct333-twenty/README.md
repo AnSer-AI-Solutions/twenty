@@ -52,8 +52,8 @@ verb the wrapper accepts.
 `configure_sales_workflow.py` keeps the Company sales workflow fields and the
 standard Company index, `Dashboard Priority Call Queue`, and `Recontact Due`
 views reproducible through Twenty's supported metadata API. It also owns the
-`Ranked Lead Review Queue`, which is a saved table view rather than a forked
-Twenty frontend.
+`Ranked Lead Review Queue` and `Sales Activity`, which are saved table views
+rather than a forked Twenty frontend.
 
 It resolves the generated index view by its stable `key == "INDEX"` identity,
 not its rendered name. The operator-created views keep their literal
@@ -85,6 +85,12 @@ fit band, fit confidence, industry, the short fit explanation, contact
 fields, and the existing sales action fields. Marking a lead Actioned or moving
 it out of `NEW`/`WORKING` removes it from this queue without deleting the
 record. `NURTURE` remains a retained lifecycle state.
+
+The `Sales Activity` view shows companies with a non-empty `Last Called At`,
+sorted newest first. It exposes the lead name, call status, last-called time,
+call notes, attempts, next follow-up, lifecycle, and disposition. `Call Notes`
+is rich text and is therefore displayed but not used as the filter; `Last Called At`
+is the canonical contacted-lead timestamp.
 
 The configurator does not read or write Company records, delete fields, remove
 view columns, remove saved-view filters, or remove saved-view sorts.
