@@ -31,7 +31,7 @@ WHERE n.nspname LIKE 'workspace_%'
 ORDER BY n.nspname
 \gset
 
-GRANT CONNECT ON DATABASE default TO twenty_crm_metrics;
+GRANT CONNECT ON DATABASE "default" TO twenty_crm_metrics;
 GRANT USAGE ON SCHEMA :"workspace_schema" TO twenty_crm_metrics;
 GRANT SELECT ON TABLE :"workspace_schema".company TO twenty_crm_metrics;
 SQL
