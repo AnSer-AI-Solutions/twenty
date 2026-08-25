@@ -75,9 +75,13 @@ database role before recreating the exporter:
 ```bash
 sudo twenty-run provision-metrics-role
 sudo twenty-run up
-curl -fsS http://127.0.0.1:9105/health
-curl -fsS http://127.0.0.1:9105/metrics | grep '^twenty_crm_'
+curl -fsS http://192.168.31.181:9105/health
+curl -fsS http://192.168.31.181:9105/metrics | grep '^twenty_crm_'
 ```
+
+The published socket is deliberately bound to the CT's private LAN address,
+not loopback or every interface. Use that address for guest-local and CT329
+acceptance checks.
 
 `provision-metrics-role` creates or rotates login `twenty_crm_metrics`, forces
 read-only transactions and a five-second statement timeout, and grants only
