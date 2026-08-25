@@ -48,6 +48,44 @@ services:
       server:
         condition: service_healthy
 
+  crm-metrics:
+    build:
+      context: ./crm-metrics-exporter
+    restart: unless-stopped
+    environment:
+      PGHOST: db
+      PGPORT: "5432"
+      PGDATABASE: default
+      PGUSER: twenty_crm_metrics
+      PGPASSWORD: ${CRM_METRICS_DATABASE_PASSWORD:?missing CRM_METRICS_DATABASE_PASSWORD}
+      PGCONNECT_TIMEOUT: "3"
+      CRM_METRICS_LISTEN_HOST: 0.0.0.0
+      CRM_METRICS_LISTEN_PORT: "9105"
+    ports:
+      - "192.168.31.181:9105:9105"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:9105/health', timeout=3).read()
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    read_only: true
+    tmpfs:
+      - /tmp:size=8m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 96m
+    cpus: 0.25
+
   db:
     image: postgres:16
     restart: unless-stopped
