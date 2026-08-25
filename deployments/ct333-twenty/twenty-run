@@ -4,10 +4,11 @@ set -euo pipefail
 readonly TOKEN_FILE="${BWS_TOKEN_FILE:-/etc/bitwarden-sm/product-apps-runtime-readonly.access-token}"
 readonly PROJECT_ID=e6c761f9-7a4d-45a4-a780-b4860116e943
 readonly COMPOSE_DIR=/opt/twenty/deployments/ct333-twenty
+readonly METRICS_ROLE_SCRIPT="$COMPOSE_DIR/provision-crm-metrics-role.sh"
 
 usage() {
-  echo "usage: twenty-run {config|up|pull|ps|logs|down}" >&2
-  echo "       up and down take no extra arguments" >&2
+  echo "usage: twenty-run {config|up|provision-metrics-role|pull|ps|logs|down}" >&2
+  echo "       up, provision-metrics-role, and down take no extra arguments" >&2
 }
 
 # up and down are the two verbs that change what is running, and one forwarded
@@ -45,6 +46,14 @@ run_compose() {
       -f "$COMPOSE_DIR/compose.yaml" "$@"
 }
 
+provision_metrics_role() {
+  load_bws_token
+
+  /usr/local/bin/bws run --project-id "$PROJECT_ID" -- \
+    env -u BWS_ACCESS_TOKEN \
+    bash "$METRICS_ROLE_SCRIPT"
+}
+
 main() {
   local action="${1:-up}"
   shift || true
@@ -54,6 +63,10 @@ main() {
     up)
       require_no_extra_args up "$@"
       run_compose up -d --remove-orphans
+      ;;
+    provision-metrics-role)
+      require_no_extra_args provision-metrics-role "$@"
+      provision_metrics_role
       ;;
     pull) run_compose pull "$@" ;;
     ps) run_compose ps "$@" ;;
