@@ -8,6 +8,7 @@ import tempfile
 import unittest
 
 SCRIPT = pathlib.Path(__file__).parents[1] / "twenty-run"
+ROLE_SCRIPT = pathlib.Path(__file__).parents[1] / "provision-crm-metrics-role.sh"
 
 # Sources the wrapper and replaces run_compose, so a dispatch is observable as
 # the argument vector docker compose would have received. $0 is the harness
@@ -23,6 +24,14 @@ provision_metrics_role() { printf '%s\\n' "provision-metrics-role" >"$log"; }
 main "$@"
 """
 HARNESS_ARGV0 = "twenty-run-dispatch-harness"
+
+
+class MetricsRoleSqlTest(unittest.TestCase):
+    def test_quotes_the_keyword_database_name(self):
+        sql = ROLE_SCRIPT.read_text()
+
+        self.assertIn('GRANT CONNECT ON DATABASE "default"', sql)
+        self.assertNotIn("GRANT CONNECT ON DATABASE default ", sql)
 
 # Every flag here is destructive or state-changing on the verb it is paired
 # with: -v/--volumes/--rmi drop the db-data volume the CRM lives on,
