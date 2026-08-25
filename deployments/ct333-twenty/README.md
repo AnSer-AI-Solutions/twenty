@@ -19,6 +19,7 @@ Install the wrapper as `/usr/local/bin/twenty-run`, then use:
 ```bash
 sudo twenty-run config
 sudo twenty-run pull
+sudo twenty-run provision-metrics-role
 sudo twenty-run up
 sudo twenty-run ps
 ```
@@ -46,6 +47,42 @@ pinned tag say, not what was typed after the verb.
 ignores extra arguments, as it always has. An unknown verb exits `2` with the
 same usage line. A missing token still exits `1`, and now does so only for a
 verb the wrapper accepts.
+
+## CRM call-activity metrics
+
+The `crm-metrics` sidecar exposes aggregate Prometheus metrics on CT 333 port
+`9105`. It treats the Sales Activity table's Company `Last Called At` field as
+the completed-call timestamp and uses Central calendar boundaries for today,
+the last 7 days, the last 30 days, and a 31-day trend.
+
+Twenty stores only the latest `Last Called At` value on each Company. These
+metrics therefore count active companies whose latest logged call falls in a
+window, not every historical attempt. A second call to the same Company
+replaces its earlier timestamp and remains one Company in the window.
+
+The exporter discovers the one readable `workspace_*` schema and selects only
+`company.id`, `deletedAt`, `lastCalledAt`, and `callStatus`. Its output contains
+counts, bounded status labels, dates, and source freshness only. Company names,
+phone numbers, record ids, notes, and other CRM fields never leave CT 333.
+
+The existing Bitwarden project `CT333 - twenty-crm Runtime`
+(`e6c761f9-7a4d-45a4-a780-b4860116e943`) must contain
+`CRM_METRICS_DATABASE_PASSWORD`. The existing
+`product-apps-runtime-readonly` CT 333 token consumes it through `twenty-run`;
+no new machine account or token is required. Provision or rotate the scoped
+database role before recreating the exporter:
+
+```bash
+sudo twenty-run provision-metrics-role
+sudo twenty-run up
+curl -fsS http://127.0.0.1:9105/health
+curl -fsS http://127.0.0.1:9105/metrics | grep '^twenty_crm_'
+```
+
+`provision-metrics-role` creates or rotates login `twenty_crm_metrics`, forces
+read-only transactions and a five-second statement timeout, and grants only
+schema usage plus SELECT on the workspace Company table. Never give the
+exporter the main `PG_DATABASE_PASSWORD` value.
 
 ## Sales workflow metadata
 

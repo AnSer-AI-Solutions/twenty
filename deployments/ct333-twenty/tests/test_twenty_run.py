@@ -19,6 +19,7 @@ log="$2"
 shift 2
 source "$script"
 run_compose() { printf '%s\\n' "$@" >"$log"; }
+provision_metrics_role() { printf '%s\\n' "provision-metrics-role" >"$log"; }
 main "$@"
 """
 HARNESS_ARGV0 = "twenty-run-dispatch-harness"
@@ -162,6 +163,12 @@ class SupportedShapeTest(TwentyRunTestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.compose_args(), ["config", "--quiet"])
 
+    def test_should_provision_the_scoped_metrics_role(self):
+        result = self.dispatch("provision-metrics-role")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.compose_args(), ["provision-metrics-role"])
+
     def test_should_still_forward_arguments_for_read_only_verbs(self):
         # pull, ps and logs cannot delete state, so their pass-through is
         # unchanged; this pins that the guard did not widen its reach.
@@ -185,7 +192,7 @@ class SupportedShapeTest(TwentyRunTestCase):
         result = self.dispatch("nuke")
 
         self.assertEqual(result.returncode, 2)
-        self.assertIn("usage: twenty-run {config|up|pull|ps|logs|down}", result.stderr)
+        self.assertIn("usage: twenty-run {config|up|provision-metrics-role|pull|ps|logs|down}", result.stderr)
         self.assertIsNone(self.compose_args())
 
 
@@ -195,7 +202,7 @@ class ArgumentGuardTest(TwentyRunTestCase):
 
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertIn(f"twenty-run {action} takes no extra arguments", result.stderr)
-        self.assertIn("usage: twenty-run {config|up|pull|ps|logs|down}", result.stderr)
+        self.assertIn("usage: twenty-run {config|up|provision-metrics-role|pull|ps|logs|down}", result.stderr)
         self.assertIsNone(
             self.compose_args(),
             f"{action} {extra} reached docker compose",
@@ -215,7 +222,7 @@ class ArgumentGuardTest(TwentyRunTestCase):
                 self.assert_refused("down", extra)
 
     def test_should_refuse_unknown_extra_args_on_both_verbs(self):
-        for action in ("up", "down"):
+        for action in ("up", "provision-metrics-role", "down"):
             for extra in UNKNOWN_EXTRA_ARGS:
                 with self.subTest(action=action, extra=extra):
                     self.reset_logs()
