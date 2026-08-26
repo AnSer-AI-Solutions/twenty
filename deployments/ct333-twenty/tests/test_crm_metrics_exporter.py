@@ -42,6 +42,23 @@ class WorkspaceDiscoveryTest(unittest.TestCase):
                 EXPORTER.discover_workspace_schema(FakeCursor(rows))
 
 
+class QueryContractTest(unittest.TestCase):
+    def test_every_call_activity_query_excludes_weekends(self) -> None:
+        for query in (
+            EXPORTER.WINDOW_QUERY,
+            EXPORTER.STATUS_QUERY,
+            EXPORTER.DAILY_QUERY,
+            EXPORTER.FRESHNESS_QUERY,
+        ):
+            with self.subTest(query=query):
+                self.assertRegex(query, r"EXTRACT\(\s*ISODOW")
+                self.assertIn("BETWEEN 1 AND 5", query)
+
+    def test_daily_graph_is_limited_to_the_last_seven_calendar_days(self) -> None:
+        self.assertIn("today - 6", EXPORTER.DAILY_QUERY)
+        self.assertNotIn("today - 30", EXPORTER.DAILY_QUERY)
+
+
 class PrometheusRenderingTest(unittest.TestCase):
     def test_renders_only_aggregate_bounded_dimensions(self) -> None:
         rendered = EXPORTER.render_metrics(

@@ -34,6 +34,9 @@ LEFT JOIN {company} AS company
  AND company."lastCalledAt" IS NOT NULL
  AND (company."lastCalledAt" AT TIME ZONE %(time_zone)s)::date
      BETWEEN windows.start_date AND windows.end_date
+ AND EXTRACT(
+       ISODOW FROM (company."lastCalledAt" AT TIME ZONE %(time_zone)s)::date
+     ) BETWEEN 1 AND 5
 GROUP BY windows.window_name
 ORDER BY windows.window_name
 """
@@ -55,6 +58,9 @@ JOIN {company} AS company
  AND company."lastCalledAt" IS NOT NULL
  AND (company."lastCalledAt" AT TIME ZONE %(time_zone)s)::date
      BETWEEN windows.start_date AND windows.end_date
+ AND EXTRACT(
+       ISODOW FROM (company."lastCalledAt" AT TIME ZONE %(time_zone)s)::date
+     ) BETWEEN 1 AND 5
 GROUP BY windows.window_name, call_status
 ORDER BY windows.window_name, call_status
 """
@@ -63,7 +69,7 @@ DAILY_QUERY = """
 WITH clock AS (
   SELECT (CURRENT_TIMESTAMP AT TIME ZONE %(time_zone)s)::date AS today
 ), days AS (
-  SELECT generate_series(today - 30, today, interval '1 day')::date AS day
+  SELECT generate_series(today - 6, today, interval '1 day')::date AS day
   FROM clock
 )
 SELECT days.day::text,
@@ -73,6 +79,7 @@ LEFT JOIN {company} AS company
   ON company."deletedAt" IS NULL
  AND company."lastCalledAt" IS NOT NULL
  AND (company."lastCalledAt" AT TIME ZONE %(time_zone)s)::date = days.day
+WHERE EXTRACT(ISODOW FROM days.day) BETWEEN 1 AND 5
 GROUP BY days.day
 ORDER BY days.day
 """
@@ -81,7 +88,11 @@ FRESHNESS_QUERY = """
 SELECT count(*)::bigint,
        coalesce(extract(epoch FROM max("lastCalledAt")), 0)::double precision
 FROM {company}
-WHERE "deletedAt" IS NULL AND "lastCalledAt" IS NOT NULL
+WHERE "deletedAt" IS NULL
+  AND "lastCalledAt" IS NOT NULL
+  AND EXTRACT(
+        ISODOW FROM ("lastCalledAt" AT TIME ZONE %(time_zone)s)::date
+      ) BETWEEN 1 AND 5
 """
 
 
@@ -122,7 +133,10 @@ def collect_metrics() -> str:
                 statuses = cursor.fetchall()
                 cursor.execute(sql.SQL(DAILY_QUERY).format(company=company), {"time_zone": TIME_ZONE})
                 daily = cursor.fetchall()
-                cursor.execute(sql.SQL(FRESHNESS_QUERY).format(company=company))
+                cursor.execute(
+                    sql.SQL(FRESHNESS_QUERY).format(company=company),
+                    {"time_zone": TIME_ZONE},
+                )
                 history_total, latest_timestamp = cursor.fetchone()
 
     return render_metrics(
@@ -145,7 +159,7 @@ def render_metrics(
     snapshot_timestamp: float,
 ) -> str:
     lines = [
-        "# HELP twenty_crm_companies_called_window Active CRM companies whose latest Last Called At is in the Central calendar window.",
+        "# HELP twenty_crm_companies_called_window Active CRM companies whose latest Last Called At is on a weekday in the Central calendar window.",
         "# TYPE twenty_crm_companies_called_window gauge",
     ]
     for window, value in windows:
@@ -153,7 +167,7 @@ def render_metrics(
 
     lines.extend(
         [
-            "# HELP twenty_crm_companies_called_status_window Active CRM companies grouped by their current call status and latest Last Called At window.",
+            "# HELP twenty_crm_companies_called_status_window Active CRM companies grouped by current call status whose latest Last Called At is on a weekday in the Central calendar window.",
             "# TYPE twenty_crm_companies_called_status_window gauge",
         ]
     )
@@ -169,7 +183,7 @@ def render_metrics(
 
     lines.extend(
         [
-            "# HELP twenty_crm_companies_called_daily Active CRM companies whose latest Last Called At falls on the Central calendar date.",
+            "# HELP twenty_crm_companies_called_daily Active CRM companies whose latest Last Called At falls on the Central weekday.",
             "# TYPE twenty_crm_companies_called_daily gauge",
         ]
     )
@@ -178,10 +192,10 @@ def render_metrics(
 
     lines.extend(
         [
-            "# HELP twenty_crm_companies_with_call_history_total Active CRM companies with any Last Called At value.",
+            "# HELP twenty_crm_companies_with_call_history_total Active CRM companies whose latest Last Called At value falls on a weekday.",
             "# TYPE twenty_crm_companies_with_call_history_total gauge",
             f"twenty_crm_companies_with_call_history_total {int(history_total)}",
-            "# HELP twenty_crm_source_latest_last_called_at_timestamp_seconds Latest active CRM Last Called At timestamp.",
+            "# HELP twenty_crm_source_latest_last_called_at_timestamp_seconds Latest active weekday CRM Last Called At timestamp.",
             "# TYPE twenty_crm_source_latest_last_called_at_timestamp_seconds gauge",
             f"twenty_crm_source_latest_last_called_at_timestamp_seconds {float(latest_timestamp):.3f}",
             "# HELP twenty_crm_metrics_snapshot_timestamp_seconds Time when this aggregate snapshot was generated.",
