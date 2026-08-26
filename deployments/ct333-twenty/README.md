@@ -53,7 +53,9 @@ verb the wrapper accepts.
 The `crm-metrics` sidecar exposes aggregate Prometheus metrics on CT 333 port
 `9105`. It treats the Sales Activity table's Company `Last Called At` field as
 the completed-call timestamp and uses Central calendar boundaries for today,
-the last 7 days, the last 30 days, and a 31-day trend.
+the last 7 days, and the retained last-30-days metric. Every aggregate excludes
+Saturday and Sunday. The dashboard trend emits only the weekdays in the rolling
+last-seven-calendar-day window.
 
 Twenty stores only the latest `Last Called At` value on each Company. These
 metrics therefore count active companies whose latest logged call falls in a
