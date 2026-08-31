@@ -25,14 +25,15 @@ INDEX_VIEW_ID = "20000000-0000-0000-0000-000000000001"
 QUEUE_VIEW_ID = "20000000-0000-0000-0000-000000000002"
 RECONTACT_VIEW_ID = "20000000-0000-0000-0000-000000000003"
 RANKED_VIEW_ID = "20000000-0000-0000-0000-000000000004"
+SALES_ACTIVITY_VIEW_ID = "20000000-0000-0000-0000-000000000005"
 
 # What Twenty renders for the Company index view today. It is a rendered string,
 # never matched on, so every test that cares states the name it is standing in
 # for explicitly.
 DEFAULT_INDEX_VIEW_NAME = "All Companies"
 
-# The index view and the Dashboard Priority Call Queue both carry SALES_COLUMNS.
-SALES_VIEW_COUNT = 2
+# The index, priority queue, and Sales Activity views carry SALES_COLUMNS.
+SALES_VIEW_COUNT = 3
 
 
 class FakeClient:
@@ -108,6 +109,13 @@ class FakeClient:
             {
                 "id": QUEUE_VIEW_ID,
                 "name": workflow.QUEUE_VIEW_NAME,
+                "key": None,
+                "isActive": True,
+                "objectMetadataId": COMPANY_ID,
+            },
+            {
+                "id": SALES_ACTIVITY_VIEW_ID,
+                "name": workflow.SALES_ACTIVITY_VIEW_NAME,
                 "key": None,
                 "isActive": True,
                 "objectMetadataId": COMPANY_ID,
@@ -441,7 +449,11 @@ class ConfigureSalesWorkflowTests(unittest.TestCase):
             ],
             [
                 (view_name, column["name"])
-                for view_name in (DEFAULT_INDEX_VIEW_NAME, workflow.QUEUE_VIEW_NAME)
+                for view_name in (
+                    DEFAULT_INDEX_VIEW_NAME,
+                    workflow.QUEUE_VIEW_NAME,
+                    workflow.SALES_ACTIVITY_VIEW_NAME,
+                )
                 for column in workflow.SALES_COLUMNS
             ]
             + [
@@ -1531,29 +1543,34 @@ class IndexViewResolutionTests(unittest.TestCase):
                 self.assertEqual(_writes(client), [])
 
 
-# Dashboard Priority Call Queue and Recontact Due are operator-created, so their
-# names are stored verbatim and stay the right way to find them.
+# The priority queue, Sales Activity, and Recontact Due are operator-created, so
+# their names are stored verbatim and stay the right way to find them.
 class NamedViewResolutionTests(unittest.TestCase):
     MODES = (False, True)
 
     OTHER_VIEW_ID = "20000000-0000-0000-0000-0000000000fe"
 
-    def test_a_missing_queue_view_fails_closed_before_any_write(self) -> None:
-        for apply in self.MODES:
-            with self.subTest(apply=apply):
-                client = FakeClient()
-                client.views.remove(client.view_named(workflow.QUEUE_VIEW_NAME))
+    def test_a_missing_required_sales_view_fails_closed_before_any_write(self) -> None:
+        for name in (workflow.QUEUE_VIEW_NAME, workflow.SALES_ACTIVITY_VIEW_NAME):
+            for apply in self.MODES:
+                with self.subTest(name=name, apply=apply):
+                    client = FakeClient()
+                    client.views.remove(client.view_named(name))
 
-                with self.assertRaisesRegex(
-                    workflow.ConfigurationError,
-                    f'"{workflow.QUEUE_VIEW_NAME}" was not found',
-                ):
-                    workflow.configure_sales_workflow(client, apply=apply)
+                    with self.assertRaisesRegex(
+                        workflow.ConfigurationError,
+                        f'"{name}" was not found',
+                    ):
+                        workflow.configure_sales_workflow(client, apply=apply)
 
-                self.assertEqual(_writes(client), [])
+                    self.assertEqual(_writes(client), [])
 
     def test_a_duplicate_managed_name_fails_closed_before_any_write(self) -> None:
-        for name in (workflow.QUEUE_VIEW_NAME, workflow.RECONTACT_VIEW_NAME):
+        for name in (
+            workflow.QUEUE_VIEW_NAME,
+            workflow.SALES_ACTIVITY_VIEW_NAME,
+            workflow.RECONTACT_VIEW_NAME,
+        ):
             for apply in self.MODES:
                 with self.subTest(name=name, apply=apply):
                     client = FakeClient(include_recontact_view=True)
@@ -1574,16 +1591,18 @@ class NamedViewResolutionTests(unittest.TestCase):
         # hand it a second column set that overwrites the first.
         for name, other_role in (
             (workflow.QUEUE_VIEW_NAME, workflow.QUEUE_VIEW_NAME),
+            (workflow.SALES_ACTIVITY_VIEW_NAME, workflow.SALES_ACTIVITY_VIEW_NAME),
             (workflow.RECONTACT_VIEW_NAME, workflow.RECONTACT_VIEW_NAME),
         ):
             for apply in self.MODES:
                 with self.subTest(name=name, apply=apply):
                     client = FakeClient()
-                    if name == workflow.QUEUE_VIEW_NAME:
+                    if name in (
+                        workflow.QUEUE_VIEW_NAME,
+                        workflow.SALES_ACTIVITY_VIEW_NAME,
+                    ):
                         # Leave the renamed index view as the only match.
-                        client.views.remove(
-                            client.view_named(workflow.QUEUE_VIEW_NAME)
-                        )
+                        client.views.remove(client.view_named(name))
                     client.index_view["name"] = name
 
                     with self.assertRaises(workflow.ConfigurationError) as caught:
