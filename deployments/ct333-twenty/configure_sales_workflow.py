@@ -1010,6 +1010,7 @@ def _configure_view_columns(
         item.get("position", 0)
         for item in view_fields
         if item.get("fieldMetadataId") not in target_ids
+        and item.get("isVisible", True) is not False
     ]
     first_position = max(non_target_positions, default=-1) + 1
     view_fields_by_field_id = {item["fieldMetadataId"]: item for item in view_fields}
