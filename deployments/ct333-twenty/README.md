@@ -119,12 +119,12 @@ It owns these Company fields:
 The standard Company table and priority queue keep their existing columns and
 append `Actioned`, `Byron Reviewed`, `Call Notes`, `Call Attempts`, and
 `Next Follow-Up`. `Sales Activity` receives only `Email Sent` and `Email Sent
-Date`, leaving its other column visibility and order untouched. The standard,
-priority, and ranked review views expose the same email fields. CT332 fills a
-blank date with the current Central calendar date after `Email Sent` is checked.
-It never clears or overwrites an existing date. The configurator also appends
-lifecycle, disposition, and recontact fields. The `Recontact Due` view shows
-only `NURTURE` companies whose `Recontact At` date is in the past.
+Date`, leaving every other view and its own existing column visibility and order
+untouched. CT332 fills a blank date with the current Central calendar date after
+`Email Sent` is checked. It never clears or overwrites an existing date. The
+configurator also appends lifecycle, disposition, and recontact fields. The
+`Recontact Due` view shows only `NURTURE` companies whose `Recontact At` date is
+in the past.
 
 The `Ranked Lead Review Queue` shows the current diversified human-review
 slate, not every scored record. It filters to `Fit Review Queue = true`,

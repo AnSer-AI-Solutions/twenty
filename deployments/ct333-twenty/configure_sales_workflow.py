@@ -390,7 +390,6 @@ EMAIL_COLUMNS: tuple[dict[str, Any], ...] = (
 SALES_COLUMNS: tuple[dict[str, Any], ...] = (
     {"name": "salesActioned", "size": 110},
     {"name": "byronReviewed", "size": 150},
-    *EMAIL_COLUMNS,
     {"name": "callNotes", "size": 320},
     {"name": "callAttempts", "size": 120},
     {"name": "nextFollowUpAt", "size": 190},
@@ -436,8 +435,6 @@ RANKED_COLUMNS: tuple[dict[str, Any], ...] = (
     {"name": "leadEmail", "size": 240},
     {"name": "salesActioned", "size": 110},
     {"name": "byronReviewed", "size": 150},
-    {"name": "emailSent", "size": 120},
-    {"name": "emailSentDate", "size": 160},
     {"name": "callStatus", "size": 150},
     {"name": "callNotes", "size": 320},
 )
