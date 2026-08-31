@@ -622,6 +622,28 @@ class ConfigureSalesWorkflowTests(unittest.TestCase):
             )
         )
 
+    def test_unrelated_hidden_mappings_do_not_reposition_visible_columns(self) -> None:
+        client = FakeClient(
+            include_sales_fields=True,
+            include_recontact_view=True,
+            include_managed_view_fields=True,
+            include_recontact_filters=True,
+        )
+        client.view_fields[client.index_view["id"]].append(
+            {
+                "id": "hidden-unrelated-field",
+                "fieldMetadataId": "field-lead-phone",
+                "isVisible": False,
+                "position": 999,
+                "size": 180,
+            }
+        )
+
+        changes = workflow.configure_sales_workflow(client, apply=True)
+
+        self.assertEqual(changes, [])
+        self.assertEqual(_writes(client), [])
+
     def test_field_type_drift_fails_before_writes(self) -> None:
         client = FakeClient(include_sales_fields=True)
         actioned = next(
