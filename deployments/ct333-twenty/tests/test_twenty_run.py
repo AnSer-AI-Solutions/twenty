@@ -9,6 +9,7 @@ import unittest
 
 SCRIPT = pathlib.Path(__file__).parents[1] / "twenty-run"
 ROLE_SCRIPT = pathlib.Path(__file__).parents[1] / "provision-crm-metrics-role.sh"
+EMAIL_TRIGGER_SCRIPT = pathlib.Path(__file__).parents[1] / "provision-email-sent-trigger.sh"
 
 # Sources the wrapper and replaces run_compose, so a dispatch is observable as
 # the argument vector docker compose would have received. $0 is the harness
@@ -21,6 +22,7 @@ shift 2
 source "$script"
 run_compose() { printf '%s\\n' "$@" >"$log"; }
 provision_metrics_role() { printf '%s\\n' "provision-metrics-role" >"$log"; }
+provision_email_sent_trigger() { printf '%s\\n' "provision-email-sent-trigger" >"$log"; }
 main "$@"
 """
 HARNESS_ARGV0 = "twenty-run-dispatch-harness"
@@ -32,6 +34,28 @@ class MetricsRoleSqlTest(unittest.TestCase):
 
         self.assertIn('GRANT CONNECT ON DATABASE "default"', sql)
         self.assertNotIn("GRANT CONNECT ON DATABASE default ", sql)
+
+
+class EmailSentTriggerSqlTest(unittest.TestCase):
+    def test_stamps_only_a_blank_date_on_first_true_transition(self):
+        sql = EMAIL_TRIGGER_SCRIPT.read_text()
+
+        self.assertIn('NEW."emailSent" IS TRUE', sql)
+        self.assertIn('NEW."emailSentDate" IS NULL', sql)
+        self.assertIn('OLD."emailSent" IS DISTINCT FROM TRUE', sql)
+        self.assertIn("AT TIME ZONE 'America/Chicago'", sql)
+
+    def test_runs_before_insert_or_email_sent_update(self):
+        sql = EMAIL_TRIGGER_SCRIPT.read_text()
+
+        self.assertIn('BEFORE INSERT OR UPDATE OF "emailSent"', sql)
+        self.assertIn('RETURN NEW;', sql)
+
+    def test_discovers_the_workspace_with_both_managed_fields(self):
+        sql = EMAIL_TRIGGER_SCRIPT.read_text()
+
+        self.assertIn("email_sent.attname = 'emailSent'", sql)
+        self.assertIn("email_sent_date.attname = 'emailSentDate'", sql)
 
 # Every flag here is destructive or state-changing on the verb it is paired
 # with: -v/--volumes/--rmi drop the db-data volume the CRM lives on,
@@ -178,6 +202,12 @@ class SupportedShapeTest(TwentyRunTestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.compose_args(), ["provision-metrics-role"])
 
+    def test_should_provision_the_email_sent_trigger(self):
+        result = self.dispatch("provision-email-sent-trigger")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.compose_args(), ["provision-email-sent-trigger"])
+
     def test_should_still_forward_arguments_for_read_only_verbs(self):
         # pull, ps and logs cannot delete state, so their pass-through is
         # unchanged; this pins that the guard did not widen its reach.
@@ -201,7 +231,7 @@ class SupportedShapeTest(TwentyRunTestCase):
         result = self.dispatch("nuke")
 
         self.assertEqual(result.returncode, 2)
-        self.assertIn("usage: twenty-run {config|up|provision-metrics-role|pull|ps|logs|down}", result.stderr)
+        self.assertIn("usage: twenty-run {config|up|provision-metrics-role|provision-email-sent-trigger|pull|ps|logs|down}", result.stderr)
         self.assertIsNone(self.compose_args())
 
 
@@ -211,7 +241,7 @@ class ArgumentGuardTest(TwentyRunTestCase):
 
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertIn(f"twenty-run {action} takes no extra arguments", result.stderr)
-        self.assertIn("usage: twenty-run {config|up|provision-metrics-role|pull|ps|logs|down}", result.stderr)
+        self.assertIn("usage: twenty-run {config|up|provision-metrics-role|provision-email-sent-trigger|pull|ps|logs|down}", result.stderr)
         self.assertIsNone(
             self.compose_args(),
             f"{action} {extra} reached docker compose",
@@ -231,7 +261,7 @@ class ArgumentGuardTest(TwentyRunTestCase):
                 self.assert_refused("down", extra)
 
     def test_should_refuse_unknown_extra_args_on_both_verbs(self):
-        for action in ("up", "provision-metrics-role", "down"):
+        for action in ("up", "provision-metrics-role", "provision-email-sent-trigger", "down"):
             for extra in UNKNOWN_EXTRA_ARGS:
                 with self.subTest(action=action, extra=extra):
                     self.reset_logs()
