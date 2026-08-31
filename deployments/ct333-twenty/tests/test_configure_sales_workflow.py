@@ -32,8 +32,9 @@ SALES_ACTIVITY_VIEW_ID = "20000000-0000-0000-0000-000000000005"
 # for explicitly.
 DEFAULT_INDEX_VIEW_NAME = "All Companies"
 
-# The index, priority queue, and Sales Activity views carry SALES_COLUMNS.
-SALES_VIEW_COUNT = 3
+# The index and priority queue carry SALES_COLUMNS. Sales Activity gets only the
+# two email columns so unrelated hidden fields remain untouched.
+SALES_VIEW_COUNT = 2
 
 
 class FakeClient:
@@ -353,6 +354,9 @@ class FakeClient:
                 columns = workflow.RANKED_COLUMNS
                 first_position = 0
                 self.view_fields[view["id"]] = []
+            elif view["name"] == workflow.SALES_ACTIVITY_VIEW_NAME:
+                columns = workflow.EMAIL_COLUMNS
+                first_position = 7
             else:
                 columns = workflow.SALES_COLUMNS
                 first_position = 7
@@ -431,6 +435,10 @@ class ConfigureSalesWorkflowTests(unittest.TestCase):
         for columns in (workflow.SALES_COLUMNS, workflow.RANKED_COLUMNS):
             self.assertIn("emailSent", [column["name"] for column in columns])
             self.assertIn("emailSentDate", [column["name"] for column in columns])
+        self.assertEqual(
+            [column["name"] for column in workflow.EMAIL_COLUMNS],
+            ["emailSent", "emailSentDate"],
+        )
 
     def test_dry_run_reports_changes_without_writes(self) -> None:
         client = FakeClient()
@@ -449,12 +457,12 @@ class ConfigureSalesWorkflowTests(unittest.TestCase):
             ],
             [
                 (view_name, column["name"])
-                for view_name in (
-                    DEFAULT_INDEX_VIEW_NAME,
-                    workflow.QUEUE_VIEW_NAME,
-                    workflow.SALES_ACTIVITY_VIEW_NAME,
-                )
+                for view_name in (DEFAULT_INDEX_VIEW_NAME, workflow.QUEUE_VIEW_NAME)
                 for column in workflow.SALES_COLUMNS
+            ]
+            + [
+                (workflow.SALES_ACTIVITY_VIEW_NAME, column["name"])
+                for column in workflow.EMAIL_COLUMNS
             ]
             + [
                 (workflow.RECONTACT_VIEW_NAME, column["name"])
@@ -496,6 +504,7 @@ class ConfigureSalesWorkflowTests(unittest.TestCase):
         self.assertEqual(
             len(view_field_creates),
             SALES_VIEW_COUNT * len(workflow.SALES_COLUMNS)
+            + len(workflow.EMAIL_COLUMNS)
             + len(workflow.RECONTACT_COLUMNS)
             + len(workflow.RANKED_COLUMNS),
         )

@@ -382,11 +382,15 @@ SALES_FIELDS: tuple[dict[str, Any], ...] = (
     },
 )
 
+EMAIL_COLUMNS: tuple[dict[str, Any], ...] = (
+    {"name": "emailSent", "size": 120},
+    {"name": "emailSentDate", "size": 160},
+)
+
 SALES_COLUMNS: tuple[dict[str, Any], ...] = (
     {"name": "salesActioned", "size": 110},
     {"name": "byronReviewed", "size": 150},
-    {"name": "emailSent", "size": 120},
-    {"name": "emailSentDate", "size": 160},
+    *EMAIL_COLUMNS,
     {"name": "callNotes", "size": 320},
     {"name": "callAttempts", "size": 120},
     {"name": "nextFollowUpAt", "size": 190},
@@ -650,7 +654,6 @@ def configure_sales_workflow(
     for view, view_details in (
         (index_view, index_view_details),
         (queue_view, {"view": QUEUE_VIEW_NAME}),
-        (sales_activity_view, {"view": SALES_ACTIVITY_VIEW_NAME}),
     ):
         changes.extend(
             _configure_view_columns(
@@ -662,6 +665,17 @@ def configure_sales_workflow(
                 apply=apply,
             )
         )
+
+    changes.extend(
+        _configure_view_columns(
+            client,
+            view=sales_activity_view,
+            view_details={"view": SALES_ACTIVITY_VIEW_NAME},
+            fields_by_name=fields_by_name,
+            columns=EMAIL_COLUMNS,
+            apply=apply,
+        )
+    )
 
     recontact_was_missing = recontact_view is None
     if recontact_view is None:
