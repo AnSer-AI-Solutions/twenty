@@ -398,6 +398,8 @@ SALES_COLUMNS: tuple[dict[str, Any], ...] = (
     {"name": "recontactAt", "size": 190},
 )
 
+INDEX_COLUMNS: tuple[dict[str, Any], ...] = (*SALES_COLUMNS, *EMAIL_COLUMNS)
+
 RECONTACT_COLUMNS: tuple[dict[str, Any], ...] = (
     {"name": "name", "size": 220},
     {"name": "leadPhone", "size": 180},
@@ -648,20 +650,26 @@ def configure_sales_workflow(
         "view": _index_view_label(index_view),
         "viewKey": INDEX_VIEW_KEY,
     }
-    for view, view_details in (
-        (index_view, index_view_details),
-        (queue_view, {"view": QUEUE_VIEW_NAME}),
-    ):
-        changes.extend(
-            _configure_view_columns(
-                client,
-                view=view,
-                view_details=view_details,
-                fields_by_name=fields_by_name,
-                columns=SALES_COLUMNS,
-                apply=apply,
-            )
+    changes.extend(
+        _configure_view_columns(
+            client,
+            view=index_view,
+            view_details=index_view_details,
+            fields_by_name=fields_by_name,
+            columns=INDEX_COLUMNS,
+            apply=apply,
         )
+    )
+    changes.extend(
+        _configure_view_columns(
+            client,
+            view=queue_view,
+            view_details={"view": QUEUE_VIEW_NAME},
+            fields_by_name=fields_by_name,
+            columns=SALES_COLUMNS,
+            apply=apply,
+        )
+    )
 
     changes.extend(
         _configure_view_columns(
