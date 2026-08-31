@@ -25,9 +25,15 @@ INDEX_VIEW_DESCRIPTION = f"Company {INDEX_VIEW_KEY} view"
 # Operator-created views. Their names are stored verbatim, so they do not move
 # with the object label and are safe to resolve by name.
 QUEUE_VIEW_NAME = "Dashboard Priority Call Queue"
+SALES_ACTIVITY_VIEW_NAME = "Sales Activity"
 RECONTACT_VIEW_NAME = "Recontact Due"
 RANKED_VIEW_NAME = "Ranked Lead Review Queue"
-NAMED_VIEW_NAMES = (QUEUE_VIEW_NAME, RECONTACT_VIEW_NAME, RANKED_VIEW_NAME)
+NAMED_VIEW_NAMES = (
+    QUEUE_VIEW_NAME,
+    SALES_ACTIVITY_VIEW_NAME,
+    RECONTACT_VIEW_NAME,
+    RANKED_VIEW_NAME,
+)
 MANAGED_VIEWS = (INDEX_VIEW_DESCRIPTION, *NAMED_VIEW_NAMES)
 
 SALES_FIELDS: tuple[dict[str, Any], ...] = (
@@ -603,9 +609,13 @@ def configure_sales_workflow(
             "/rest/metadata/views?" + urlencode({"objectMetadataId": company["id"]}),
         )
     )
-    index_view, queue_view, recontact_view, ranked_view = _resolve_managed_views(
-        views, company["id"]
-    )
+    (
+        index_view,
+        queue_view,
+        sales_activity_view,
+        recontact_view,
+        ranked_view,
+    ) = _resolve_managed_views(views, company["id"])
 
     for definition in SALES_FIELDS:
         existing = fields_by_name.get(definition["name"])
@@ -640,6 +650,7 @@ def configure_sales_workflow(
     for view, view_details in (
         (index_view, index_view_details),
         (queue_view, {"view": QUEUE_VIEW_NAME}),
+        (sales_activity_view, {"view": SALES_ACTIVITY_VIEW_NAME}),
     ):
         changes.extend(
             _configure_view_columns(
@@ -833,22 +844,27 @@ def _resolve_managed_views(
 ) -> tuple[
     dict[str, Any],
     dict[str, Any],
+    dict[str, Any],
     dict[str, Any] | None,
     dict[str, Any] | None,
 ]:
     index_view = _resolve_index_view(views, company_id)
     queue_view = _resolve_named_view(views, QUEUE_VIEW_NAME, required=True)
+    sales_activity_view = _resolve_named_view(
+        views, SALES_ACTIVITY_VIEW_NAME, required=True
+    )
     recontact_view = _resolve_named_view(views, RECONTACT_VIEW_NAME, required=False)
     ranked_view = _resolve_named_view(views, RANKED_VIEW_NAME, required=False)
     _reject_role_collisions(
         (
             (INDEX_VIEW_DESCRIPTION, index_view),
             (QUEUE_VIEW_NAME, queue_view),
+            (SALES_ACTIVITY_VIEW_NAME, sales_activity_view),
             (RECONTACT_VIEW_NAME, recontact_view),
             (RANKED_VIEW_NAME, ranked_view),
         )
     )
-    return index_view, queue_view, recontact_view, ranked_view
+    return index_view, queue_view, sales_activity_view, recontact_view, ranked_view
 
 
 def _resolve_index_view(

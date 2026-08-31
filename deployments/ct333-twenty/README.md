@@ -116,8 +116,8 @@ It owns these Company fields:
   `leadFitReason`, `leadFitModelVersion`, and `leadFitScoredAt`
 - `leadReviewQueue` and `leadReviewRank`
 
-The two existing sales table views keep their existing columns and append
-`Actioned`, `Byron Reviewed`, `Call Notes`, `Call Attempts`, and
+The existing sales table views, including `Sales Activity`, keep their existing
+columns and append `Actioned`, `Byron Reviewed`, `Call Notes`, `Call Attempts`, and
 `Next Follow-Up`. They also show `Email Sent` and `Email Sent Date`; the ranked
 review queue exposes the same two fields. CT332 fills a blank date with the
 current Central calendar date after `Email Sent` is checked. It never clears or
