@@ -432,13 +432,13 @@ class ConfigureSalesWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(definitions["emailSentDate"]["type"], "DATE")
         self.assertTrue(definitions["emailSentDate"]["isNullable"])
-        for columns in (workflow.SALES_COLUMNS, workflow.RANKED_COLUMNS):
-            self.assertIn("emailSent", [column["name"] for column in columns])
-            self.assertIn("emailSentDate", [column["name"] for column in columns])
         self.assertEqual(
             [column["name"] for column in workflow.EMAIL_COLUMNS],
             ["emailSent", "emailSentDate"],
         )
+        for columns in (workflow.SALES_COLUMNS, workflow.RANKED_COLUMNS):
+            self.assertNotIn("emailSent", [column["name"] for column in columns])
+            self.assertNotIn("emailSentDate", [column["name"] for column in columns])
 
     def test_dry_run_reports_changes_without_writes(self) -> None:
         client = FakeClient()
