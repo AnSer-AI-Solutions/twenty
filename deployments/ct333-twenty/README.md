@@ -20,13 +20,14 @@ Install the wrapper as `/usr/local/bin/twenty-run`, then use:
 sudo twenty-run config
 sudo twenty-run pull
 sudo twenty-run provision-metrics-role
+sudo twenty-run provision-email-sent-trigger
 sudo twenty-run up
 sudo twenty-run ps
 ```
 
 ### Guarded arguments
 
-`up` and `down` take no arguments. Anything extra is refused with exit status
+`up`, `down`, and both provisioning actions take no arguments. Anything extra is refused with exit status
 `2` and a usage line, before the runtime token is read and before `bws` or
 `docker` is executed:
 
@@ -119,9 +120,13 @@ It owns these Company fields:
 The standard `All Leads` table and priority queue keep their existing columns
 and append `Actioned`, `Byron Reviewed`, `Call Notes`, `Call Attempts`, and
 `Next Follow-Up`. `All Leads` and `Sales Activity` also receive `Email Sent` and
-`Email Sent Date`; other specialized views do not. CT332 fills a blank date with
-the current Central calendar date after `Email Sent` is checked. It never clears
-or overwrites an existing date. The configurator also appends lifecycle,
+`Email Sent Date`; other specialized views do not. CT333 fills a blank date with
+the current Central calendar date in the same database transaction when `Email
+Sent` is first checked. The returned Twenty record therefore already contains
+the date; no polling worker or refresh is required. It never clears or
+overwrites an existing date. Install or reconcile the idempotent trigger after
+the fields exist with `sudo twenty-run provision-email-sent-trigger`. The
+configurator also appends lifecycle,
 disposition, and recontact fields. The `Recontact Due` view shows only `NURTURE`
 companies whose `Recontact At` date is in the past.
 
