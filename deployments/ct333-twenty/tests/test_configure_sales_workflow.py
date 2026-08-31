@@ -32,9 +32,8 @@ SALES_ACTIVITY_VIEW_ID = "20000000-0000-0000-0000-000000000005"
 # for explicitly.
 DEFAULT_INDEX_VIEW_NAME = "All Companies"
 
-# The index and priority queue carry SALES_COLUMNS. Sales Activity gets only the
-# two email columns so unrelated hidden fields remain untouched.
-SALES_VIEW_COUNT = 2
+# The index carries INDEX_COLUMNS, the priority queue carries SALES_COLUMNS,
+# and Sales Activity gets only EMAIL_COLUMNS.
 
 
 class FakeClient:
@@ -357,6 +356,9 @@ class FakeClient:
             elif view["name"] == workflow.SALES_ACTIVITY_VIEW_NAME:
                 columns = workflow.EMAIL_COLUMNS
                 first_position = 7
+            elif view.get("key") == workflow.INDEX_VIEW_KEY:
+                columns = workflow.INDEX_COLUMNS
+                first_position = 7
             else:
                 columns = workflow.SALES_COLUMNS
                 first_position = 7
@@ -456,8 +458,11 @@ class ConfigureSalesWorkflowTests(unittest.TestCase):
                 if change.resource == "viewField"
             ],
             [
-                (view_name, column["name"])
-                for view_name in (DEFAULT_INDEX_VIEW_NAME, workflow.QUEUE_VIEW_NAME)
+                (DEFAULT_INDEX_VIEW_NAME, column["name"])
+                for column in workflow.INDEX_COLUMNS
+            ]
+            + [
+                (workflow.QUEUE_VIEW_NAME, column["name"])
                 for column in workflow.SALES_COLUMNS
             ]
             + [
@@ -503,7 +508,8 @@ class ConfigureSalesWorkflowTests(unittest.TestCase):
         ]
         self.assertEqual(
             len(view_field_creates),
-            SALES_VIEW_COUNT * len(workflow.SALES_COLUMNS)
+            len(workflow.INDEX_COLUMNS)
+            + len(workflow.SALES_COLUMNS)
             + len(workflow.EMAIL_COLUMNS)
             + len(workflow.RECONTACT_COLUMNS)
             + len(workflow.RANKED_COLUMNS),
@@ -590,7 +596,7 @@ class ConfigureSalesWorkflowTests(unittest.TestCase):
             include_recontact_filters=True,
         )
         standard_view = client.index_view
-        target_names = {column["name"] for column in workflow.SALES_COLUMNS}
+        target_names = {column["name"] for column in workflow.INDEX_COLUMNS}
         fields_by_id = {
             field["id"]: field["name"] for field in client.company["fields"]
         }
@@ -608,7 +614,7 @@ class ConfigureSalesWorkflowTests(unittest.TestCase):
         ]
         self.assertEqual(
             [change.name for change in standard_changes],
-            [column["name"] for column in workflow.SALES_COLUMNS],
+            [column["name"] for column in workflow.INDEX_COLUMNS],
         )
         self.assertTrue(
             all(
@@ -1267,7 +1273,9 @@ class PreflightDependencyTests(unittest.TestCase):
         managed = {
             column["name"]
             for column in (
+                *workflow.INDEX_COLUMNS,
                 *workflow.SALES_COLUMNS,
+                *workflow.EMAIL_COLUMNS,
                 *workflow.RECONTACT_COLUMNS,
                 *workflow.RANKED_COLUMNS,
             )
@@ -1416,7 +1424,7 @@ class IndexViewResolutionTests(unittest.TestCase):
         index_changes = _index_view_changes(changes)
         self.assertEqual(
             [change.name for change in index_changes],
-            [column["name"] for column in workflow.SALES_COLUMNS],
+            [column["name"] for column in workflow.INDEX_COLUMNS],
         )
         # The rendered name is reported, because that is what the operator sees
         # in the UI, but it played no part in finding the view.
@@ -1430,7 +1438,7 @@ class IndexViewResolutionTests(unittest.TestCase):
             and call[2] is not None
             and call[2]["viewId"] == INDEX_VIEW_ID
         ]
-        self.assertEqual(len(posted), len(workflow.SALES_COLUMNS))
+        self.assertEqual(len(posted), len(workflow.INDEX_COLUMNS))
 
     def test_writes_are_identical_under_any_rendered_name(self) -> None:
         baseline = FakeClient(index_view_name=DEFAULT_INDEX_VIEW_NAME)
@@ -1474,7 +1482,7 @@ class IndexViewResolutionTests(unittest.TestCase):
                 index_changes = _index_view_changes(changes)
                 self.assertEqual(
                     [change.name for change in index_changes],
-                    [column["name"] for column in workflow.SALES_COLUMNS],
+                    [column["name"] for column in workflow.INDEX_COLUMNS],
                 )
                 self.assertTrue(
                     all(
@@ -1544,7 +1552,7 @@ class IndexViewResolutionTests(unittest.TestCase):
             any(self.OTHER_VIEW_ID in call[1] for call in client.calls)
         )
         self.assertEqual(
-            len(client.view_fields[INDEX_VIEW_ID]), 2 + len(workflow.SALES_COLUMNS)
+            len(client.view_fields[INDEX_VIEW_ID]), 2 + len(workflow.INDEX_COLUMNS)
         )
 
     def test_an_index_view_belonging_to_another_object_fails_closed(self) -> None:
