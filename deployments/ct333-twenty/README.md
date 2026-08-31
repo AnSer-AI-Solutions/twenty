@@ -109,6 +109,8 @@ It owns these Company fields:
   `callNotes`
 - `salesActioned` (label `Actioned`) and `byronReviewed` (label
   `Byron Reviewed`)
+- `emailSent` (label `Email Sent`) and `emailSentDate` (label
+  `Email Sent Date`)
 - `salesLifecycleStatus`, `salesDisposition`, and `recontactAt`
 - `leadFitScore`, `leadFitRank`, `leadFitPriority`, `leadFitConfidence`,
   `leadFitReason`, `leadFitModelVersion`, and `leadFitScoredAt`
@@ -116,9 +118,12 @@ It owns these Company fields:
 
 The two existing sales table views keep their existing columns and append
 `Actioned`, `Byron Reviewed`, `Call Notes`, `Call Attempts`, and
-`Next Follow-Up`. The configurator also appends lifecycle, disposition, and
-recontact fields. The `Recontact Due` view shows only `NURTURE` companies
-whose `Recontact At` date is in the past.
+`Next Follow-Up`. They also show `Email Sent` and `Email Sent Date`; the ranked
+review queue exposes the same two fields. CT332 fills a blank date with the
+current Central calendar date after `Email Sent` is checked. It never clears or
+overwrites an existing date. The configurator also appends lifecycle,
+disposition, and recontact fields. The `Recontact Due` view shows only
+`NURTURE` companies whose `Recontact At` date is in the past.
 
 The `Ranked Lead Review Queue` shows the current diversified human-review
 slate, not every scored record. It filters to `Fit Review Queue = true`,
