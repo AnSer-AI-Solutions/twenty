@@ -402,6 +402,28 @@ class FakeClient:
 
 
 class ConfigureSalesWorkflowTests(unittest.TestCase):
+    def test_email_tracking_fields_and_columns_are_managed(self) -> None:
+        definitions = {
+            definition["name"]: definition for definition in workflow.SALES_FIELDS
+        }
+
+        self.assertEqual(
+            definitions["emailSent"],
+            {
+                "type": "BOOLEAN",
+                "name": "emailSent",
+                "label": "Email Sent",
+                "description": "Sales has sent an email to this lead",
+                "defaultValue": False,
+                "isNullable": False,
+            },
+        )
+        self.assertEqual(definitions["emailSentDate"]["type"], "DATE")
+        self.assertTrue(definitions["emailSentDate"]["isNullable"])
+        for columns in (workflow.SALES_COLUMNS, workflow.RANKED_COLUMNS):
+            self.assertIn("emailSent", [column["name"] for column in columns])
+            self.assertIn("emailSentDate", [column["name"] for column in columns])
+
     def test_dry_run_reports_changes_without_writes(self) -> None:
         client = FakeClient()
 
