@@ -134,6 +134,21 @@ SALES_FIELDS: tuple[dict[str, Any], ...] = (
         "isNullable": False,
     },
     {
+        "type": "BOOLEAN",
+        "name": "emailSent",
+        "label": "Email Sent",
+        "description": "Sales has sent an email to this lead",
+        "defaultValue": False,
+        "isNullable": False,
+    },
+    {
+        "type": "DATE",
+        "name": "emailSentDate",
+        "label": "Email Sent Date",
+        "description": "Central calendar date when Email Sent was first checked",
+        "isNullable": True,
+    },
+    {
         "type": "SELECT",
         "name": "salesLifecycleStatus",
         "label": "Lifecycle Status",
@@ -364,6 +379,8 @@ SALES_FIELDS: tuple[dict[str, Any], ...] = (
 SALES_COLUMNS: tuple[dict[str, Any], ...] = (
     {"name": "salesActioned", "size": 110},
     {"name": "byronReviewed", "size": 150},
+    {"name": "emailSent", "size": 120},
+    {"name": "emailSentDate", "size": 160},
     {"name": "callNotes", "size": 320},
     {"name": "callAttempts", "size": 120},
     {"name": "nextFollowUpAt", "size": 190},
@@ -409,6 +426,8 @@ RANKED_COLUMNS: tuple[dict[str, Any], ...] = (
     {"name": "leadEmail", "size": 240},
     {"name": "salesActioned", "size": 110},
     {"name": "byronReviewed", "size": 150},
+    {"name": "emailSent", "size": 120},
+    {"name": "emailSentDate", "size": 160},
     {"name": "callStatus", "size": 150},
     {"name": "callNotes", "size": 320},
 )
